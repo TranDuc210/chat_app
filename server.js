@@ -22,7 +22,7 @@ const LIMIT = 5, WINDOW_MS = 5000; // chong spam: 5 tin / 5 giay
 
 const rooms = Object.create(null); // { tenRoom: { history: [], users: Map } }
 let dirty = false;                 // true = co du lieu moi chua luu
-
+const cidOf = new Map(); // socket.id -> ma nhan dang cua tab trinh duyet
 // ---- Doc du lieu cu tu file khi bat server ----
 try {
   const saved = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
@@ -67,17 +67,25 @@ io.on('connection', (socket) => {
 
   socket.emit('rooms', Object.keys(rooms));
 
-  socket.on('join', ({ name, room }) => {
+    socket.on('join', ({ name, room, pass, cid }) => {
+    const myCid = clean(cid, 40);
+    cidOf.set(socket.id, myCid);
     const newName = clean(name, 20) || 'Khach';
     const roomName = clean(room, 20).toLowerCase() || 'chung';
 
     // Kiem tra trung ten trong room dich (bo qua chinh minh)
     const existing = rooms[roomName];
     if (existing) {
-      for (const [id, n] of existing.users) {
+    for (const [id, n] of [...existing.users]) {
         if (id !== socket.id && n.toLowerCase() === newName.toLowerCase()) {
+          // Ket noi cu cua CHINH tab nay (vd sau khi bam F5) -> dong no lai, cho vao
+          if (myCid && cidOf.get(id) === myCid) {
+            const old = io.sockets.sockets.get(id);
+            if (old) old.disconnect(true);
+            continue;
+          }
           socket.emit('warn', 'Ten "' + newName + '" da co nguoi dung trong phong nay.');
-          if (!currentRoom) socket.emit('retry-login'); // chua vao phong nao -> ve man hinh dang nhap
+          if (!currentRoom) socket.emit('retry-login');
           return;
         }
       }
@@ -133,6 +141,7 @@ io.on('connection', (socket) => {
   }
 
   socket.on('disconnect', () => {
+    cidOf.delete(socket.id);
     if (currentRoom) leave();
   });
 });

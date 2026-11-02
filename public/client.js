@@ -1,56 +1,94 @@
 const $ = (id) => document.getElementById(id);
-let socket, myName = '', currentRoom = 'chung';
+let socket, myName = '';
+let currentRoom = 'chung', currentPass = ''; // phong va mat khau dang o
+let tryPass = '';                             // mat khau dang thu
+
+// Ma nhan dang cua tab nay (giu nguyen khi bam F5, moi tab mot ma)
+let cid = sessionStorage.getItem('cid');
+if (!cid) {
+  cid = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  sessionStorage.setItem('cid', cid);
+}
 
 // 1. Dang nhap
-$('loginForm').addEventListener('submit', (e) => {
-  e.preventDefault();
-  myName = $('nameInput').value.trim();
-  if (!myName) return;
-
+function login(name) {
+  myName = name;
+  sessionStorage.setItem('name', name); // nho ten de F5 tu vao lai
   $('login').classList.add('hidden');
   $('app').classList.remove('hidden');
 
-  socket = io({ transports: ['websocket'] }); // chi dung websocket
+  socket = io({ transports: ['websocket'] });
   setupSocket();
-  socket.emit('join', { name: myName, room: currentRoom });
+}
+
+$('loginForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const name = $('nameInput').value.trim();
+  if (name) login(name);
 });
+
+// Gui yeu cau vao phong (kem mat khau neu co)
+function requestJoin(room, pass) {
+  tryPass = pass || '';
+  socket.emit('join', { name: myName, room, pass: tryPass, cid });
+}
 
 // 2. Lang nghe su kien tu server
 function setupSocket() {
+  // Chay MOI LAN ket noi duoc (ke ca ket noi lai)
+  socket.on('connect', () => requestJoin(currentRoom, currentPass));
+
+  socket.on('disconnect', (reason) => {
+    const note = reason === 'io server disconnect'
+      ? '(bi ngat ket noi, hay tai lai trang)'
+      : '(mat ket noi, dang thu lai...)';
+    $('roomTitle').textContent = '# ' + currentRoom + '  ' + note;
+  });
+
   socket.on('rooms', (list) => {
     $('roomList').innerHTML = '';
-    list.forEach((r) => {
+    list.forEach(([r, locked]) => {
       const li = document.createElement('li');
-      li.textContent = '# ' + r;
+      li.textContent = (locked ? '🔒 ' : '# ') + r;
+      li.dataset.room = r;
       if (r === currentRoom) li.classList.add('active');
-      li.onclick = () => joinRoom(r);
+      li.onclick = () => joinRoom(r, locked);
       $('roomList').appendChild(li);
     });
   });
- 
+
   socket.on('joined', ({ room, history, users }) => {
     currentRoom = room;
+    currentPass = tryPass; // nho mat khau de tu vao lai khi mat ket noi
     $('roomTitle').textContent = '# ' + room;
     $('messages').innerHTML = '';
     history.forEach(addMessage);
     renderUsers(users);
-    // to sang phong dang active
     [...$('roomList').children].forEach((li) =>
-      li.classList.toggle('active', li.textContent === '# ' + room));
+      li.classList.toggle('active', li.dataset.room === room));
   });
-  socket.on('warn', (text) => alert(text));
+
   socket.on('msg', addMessage);
   socket.on('users', renderUsers);
+  socket.on('warn', (text) => alert(text));
   socket.on('retry-login', () => {
+    currentRoom = 'chung';
+    currentPass = '';
+    sessionStorage.removeItem('name'); // quen ten de khong bi lap vo han
     socket.disconnect();
     $('app').classList.add('hidden');
     $('login').classList.remove('hidden');
   });
 }
 
-function joinRoom(room) {
+function joinRoom(room, locked) {
   if (room === currentRoom) return;
-  socket.emit('join', { name: myName, room });
+  let pass = '';
+  if (locked) {
+    pass = prompt('Nhap mat khau cua phong "' + room + '":');
+    if (pass === null) return; // bam Huy
+  }
+  requestJoin(room, pass);
 }
 
 // 3. Hien thi tin nhan
@@ -101,11 +139,18 @@ $('msgForm').addEventListener('submit', (e) => {
   $('msgInput').value = '';
 });
 
-// 5. Tao phong moi
+// 5. Tao phong moi (hoac vao phong da co)
 $('newRoomForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const name = $('newRoomInput').value.trim().toLowerCase();
+  const pass = $('newRoomPass').value;
   if (!name) return;
   $('newRoomInput').value = '';
-  socket.emit('join', { name: myName, room: name });
+  $('newRoomPass').value = '';
+  requestJoin(name, pass);
 });
+
+// 6. Neu tab nay da dang nhap truoc do (vd vua bam F5) thi tu vao lai
+// (dong nay PHAI nam o cuoi file)
+const savedName = sessionStorage.getItem('name');
+if (savedName) login(savedName);
