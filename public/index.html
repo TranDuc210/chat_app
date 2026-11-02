@@ -84,8 +84,30 @@
       </div>
       <div class="hint">Tren dien thoai: giu nut 🎤 tren thanh tieu de de noi. Che do nhan de noi cung la cach tot nhat de tranh tieng vang.</div>
 
+      <div class="opt-title">THIET BI AM THANH</div>
+      <label class="field">Dau vao (micro)
+        <select id="micSelect"></select>
+      </label>
+      <label class="field">Dau ra (loa / tai nghe)
+        <select id="spkSelect"></select>
+      </label>
+      <div id="deviceHint" class="hint"></div>
+      <button type="button" id="refreshDevBtn" class="gray">Lam moi danh sach thiet bi</button>
+      <div class="hint">De "Mac dinh cua may" thi app tu dung thiet bi ma may dang chon (cam tai nghe vao la dung tai nghe). Dung loa ngoai ket hop micro de bi vang.</div>
+
+      <div class="opt-title">NGUONG LOC TIENG ON</div>
+      <div id="meterBox">
+        <div id="meter"><div id="meterBar"></div><div id="meterThr" class="hidden"></div></div>
+        <div id="meterText" class="hint"></div>
+      </div>
+      <label class="field">
+        <span>Nguong mic: <b id="gateLabel">Tat</b></span>
+        <input type="range" id="gateSlider" min="-80" max="-10" step="1" value="-80">
+      </label>
+      <div class="hint">Am thanh nho hon nguong se KHONG duoc gui di. Keo het sang trai = Tat. Muc dB la so am: cang gan 0 cang khat khe. Hay im lang vai giay de xem thanh do, roi dat nguong cao hon muc tieng on mot chut nhung thap hon giong noi cua ban.</div>
+
       <button type="button" id="leaveVoiceBtn" class="gray">Roi voice</button>
-      <div class="hint">Hay dung tai nghe de khong bi vang tieng. Neu nghe thay giong minh, xem lai huong dan chan doan.</div>
+      <div class="hint">Hay dung tai nghe de khong bi vang tieng.</div>
 
       <div class="row"><button type="button" id="closeVoiceModal">Xong</button></div>
     </div>
