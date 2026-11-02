@@ -66,6 +66,7 @@ function setupSocket() {
     renderUsers(users);
     [...$('roomList').children].forEach((li) =>
       li.classList.toggle('active', li.dataset.room === room));
+    closePanels(); // tren dien thoai: dong ngan keo sau khi vao phong
   });
 
   socket.on('msg', addMessage);
@@ -82,7 +83,7 @@ function setupSocket() {
 }
 
 function joinRoom(room, locked) {
-  if (room === currentRoom) return;
+  if (room === currentRoom) { closePanels(); return; }
   let pass = '';
   if (locked) {
     pass = prompt('Nhap mat khau cua phong "' + room + '":');
@@ -142,15 +143,48 @@ $('msgForm').addEventListener('submit', (e) => {
 // 5. Tao phong moi (hoac vao phong da co)
 $('newRoomForm').addEventListener('submit', (e) => {
   e.preventDefault();
- const name = $('newRoomInput').value.trim().toLowerCase().replace(/\s+/g, '-');
+  const name = $('newRoomInput').value.trim().toLowerCase().replace(/\s+/g, '-');
   const pass = $('newRoomPass').value;
   if (!name) return;
   $('newRoomInput').value = '';
   $('newRoomPass').value = '';
+  closeRoomModal();
   requestJoin(name, pass);
 });
 
-// 6. Neu tab nay da dang nhap truoc do (vd vua bam F5) thi tu vao lai
-// (dong nay PHAI nam o cuoi file)
+// 6. Hop tao phong: mo / dong
+function openRoomModal() {
+  $('roomModal').classList.remove('hidden');
+  $('newRoomInput').focus();
+}
+function closeRoomModal() {
+  $('roomModal').classList.add('hidden');
+}
+$('addRoomBtn').onclick = openRoomModal;
+$('cancelRoomBtn').onclick = closeRoomModal;
+$('roomModal').addEventListener('click', (e) => {
+  if (e.target === $('roomModal')) closeRoomModal(); // bam ra vung toi ben ngoai
+});
+
+// 7. Giao dien dien thoai: ngan keo phong / online
+function closePanels() {
+  $('rooms').classList.remove('open');
+  $('users').classList.remove('open');
+  $('backdrop').classList.add('hidden');
+}
+function togglePanel(id) {
+  const willOpen = !$(id).classList.contains('open');
+  closePanels();
+  if (willOpen) {
+    $(id).classList.add('open');
+    $('backdrop').classList.remove('hidden');
+  }
+}
+$('menuBtn').onclick = () => togglePanel('rooms');
+$('usersBtn').onclick = () => togglePanel('users');
+$('backdrop').onclick = closePanels;
+
+// 8. Neu tab nay da dang nhap truoc do (vd vua bam F5) thi tu vao lai
+// (doan nay PHAI nam o cuoi file)
 const savedName = sessionStorage.getItem('name');
 if (savedName) login(savedName);

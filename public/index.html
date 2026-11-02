@@ -22,15 +22,15 @@
     <aside id="rooms">
       <div class="title">PHONG</div>
       <ul id="roomList"></ul>
-      <form id="newRoomForm">
-        <input id="newRoomInput" placeholder="Ten phong" maxlength="20">
-        <input id="newRoomPass" type="password" placeholder="Mat khau (co the bo trong)" maxlength="50">
-        <button>Tao / Vao phong</button>
-      </form>
+      <button id="addRoomBtn" type="button">+ Tao phong</button>
     </aside>
 
     <main>
-      <header id="roomTitle"># chung</header>
+      <header>
+        <button id="menuBtn" type="button" class="icon">☰</button>
+        <span id="roomTitle"># chung</span>
+        <button id="usersBtn" type="button" class="icon">👥</button>
+      </header>
       <div id="messages"></div>
       <form id="msgForm">
         <input id="msgInput" placeholder="Nhap tin nhan..." maxlength="500" autocomplete="off">
@@ -41,6 +41,22 @@
       <div class="title">ONLINE</div>
       <ul id="userList"></ul>
     </aside>
+
+    <!-- Lop toi phia sau ngan keo (chi dung tren dien thoai) -->
+    <div id="backdrop" class="hidden"></div>
+  </div>
+
+  <!-- Hop tao phong moi -->
+  <div id="roomModal" class="hidden">
+    <form id="newRoomForm">
+      <h3>Tao phong moi</h3>
+      <input id="newRoomInput" placeholder="Ten phong" maxlength="20" autocomplete="off">
+      <input id="newRoomPass" type="password" placeholder="Mat khau (co the bo trong)" maxlength="50" autocomplete="new-password">
+      <div class="row">
+        <button type="button" id="cancelRoomBtn" class="gray">Huy</button>
+        <button>Tao</button>
+      </div>
+    </form>
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
