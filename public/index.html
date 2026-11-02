@@ -29,8 +29,8 @@
       <header>
         <button id="menuBtn" type="button" class="icon">☰</button>
         <span id="roomTitle"># chung</span>
-        <button id="voiceBtn" type="button" class="vbtn">🎧 Voice</button>
-        <button id="muteBtn" type="button" class="vbtn hidden">🎙</button>
+        <button id="voiceBtn" type="button" class="vbtn off">🎧 Bat voice</button>
+        <button id="settingsBtn" type="button" title="Cai dat voice">⚙</button>
         <button id="usersBtn" type="button" class="icon">👥</button>
       </header>
       <div id="messages"></div>
@@ -51,6 +51,9 @@
   <!-- Noi phat am thanh cua nguoi khac trong voice (khong hien ra) -->
   <div id="audioBox" class="audiobox"></div>
 
+  <!-- Dong thong bao nho o cuoi man hinh -->
+  <div id="toast" class="hidden"></div>
+
   <!-- Hop tao phong moi -->
   <div id="roomModal" class="hidden">
     <form id="newRoomForm">
@@ -62,6 +65,30 @@
         <button>Tao</button>
       </div>
     </form>
+  </div>
+
+  <!-- Hop cai dat voice -->
+  <div id="voiceModal" class="hidden">
+    <div id="voicePanel">
+      <h3>Cai dat voice</h3>
+
+      <label class="opt"><input type="checkbox" id="optAuto"> Tu dong vao voice khi vao phong</label>
+
+      <div class="opt-title">CHE DO NOI</div>
+      <label class="opt"><input type="radio" name="vmode" value="auto"> Tu dong noi (mic luon mo)</label>
+      <label class="opt"><input type="radio" name="vmode" value="ptt"> Nhan de noi (chi noi khi giu phim)</label>
+
+      <div id="pttKeyRow" class="opt hidden">
+        Phim nhan de noi:
+        <button type="button" id="pttKeyBtn" class="gray">`</button>
+      </div>
+      <div class="hint">Tren dien thoai: giu nut 🎤 tren thanh tieu de de noi. Che do nhan de noi cung la cach tot nhat de tranh tieng vang.</div>
+
+      <button type="button" id="leaveVoiceBtn" class="gray">Roi voice</button>
+      <div class="hint">Hay dung tai nghe de khong bi vang tieng. Neu nghe thay giong minh, xem lai huong dan chan doan.</div>
+
+      <div class="row"><button type="button" id="closeVoiceModal">Xong</button></div>
+    </div>
   </div>
 
   <script src="/socket.io/socket.io.js"></script>

@@ -7,6 +7,35 @@ let lastRooms = [];                           // danh sach phong moi nhat tu ser
 let currentUsers = [];                        // nguoi dang o trong phong hien tai
 let voiceNames = [];                          // nguoi dang trong voice cua phong hien tai
 
+// Luu cai dat tren may (con nguyen sau khi dong trinh duyet)
+const store = {
+  get(k, d) {
+    try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; }
+  },
+  set(k, v) {
+    try { localStorage.setItem(k, v); } catch (e) { /* bo qua */ }
+  }
+};
+let voiceMode = store.get('voiceMode', 'auto') === 'ptt' ? 'ptt' : 'auto'; // 'auto' | 'ptt'
+let pttKey = store.get('pttKey', 'Backquote');                              // phim nhan de noi
+let autoVoice = store.get('autoVoice', '1') === '1';                        // tu dong vao voice
+
+// Dong thong bao nho o cuoi man hinh (thay cho hop thoai)
+let toastTimer = null;
+let told = {};
+function toast(text) {
+  const t = $('toast');
+  t.textContent = text;
+  t.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.add('hidden'), 7000);
+}
+function toastOnce(key, text) { // moi loai thong bao chi hien 1 lan
+  if (told[key]) return;
+  told[key] = true;
+  toast(text);
+}
+
 // Ma nhan dang cua tab nay (giu nguyen khi bam F5, moi tab mot ma)
 let cid = sessionStorage.getItem('cid');
 if (!cid) {
@@ -73,7 +102,7 @@ function setupSocket() {
   socket.on('connect', () => requestJoin(currentRoom, currentPass));
 
   socket.on('disconnect', (reason) => {
-    leaveVoice(false); // mat ket noi thi tu roi voice
+    leaveVoice(false); // mat ket noi thi tu roi voice (noi lai se tu vao lai)
     const note = reason === 'io server disconnect'
       ? '(bi ngat ket noi, hay tai lai trang)'
       : '(mat ket noi, dang thu lai...)';
@@ -96,6 +125,7 @@ function setupSocket() {
     history.forEach(addMessage);
     renderUsers(users);   // cung cap nhat danh sach phong
     closePanels();        // tren dien thoai: dong ngan keo sau khi vao phong
+    if (autoVoice) joinVoice(); // tu dong vao voice cua phong moi
   });
 
   socket.on('msg', addMessage);
@@ -125,7 +155,12 @@ function setupSocket() {
   });
   socket.on('voice-signal', onSignal);
   socket.on('voice-peer-left', (id) => closePeer(id));
-  socket.on('voice-denied', () => leaveVoice(false));
+  socket.on('voice-denied', (max) => {
+    leaveVoice(false);
+    voiceFull = true;
+    updateVoiceUI();
+    toast('Voice cua phong nay da day (toi da ' + (max || '') + ' nguoi). Ban van chat chu binh thuong.');
+  });
 }
 
 function joinRoom(room, locked) {
@@ -293,10 +328,14 @@ const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' }
 ];
 
-let localStream = null;   // micro cua minh
-let inVoice = false;      // dang trong voice hay khong
-let muted = false;        // dang tat mic hay khong
-let warnedFail = false;   // chi bao loi ket noi 1 lan moi phien voice
+let localStream = null;   // micro cua minh (null neu chi nghe)
+let inVoice = false;      // da o trong voice cua phong
+let joining = false;      // dang xin micro / dang vao voice
+let listenOnly = false;   // vao voice nhung khong co micro
+let voiceFull = false;    // voice cua phong da day
+let muted = false;        // (che do tu dong) dang tat mic
+let talking = false;      // (che do nhan de noi) dang giu phim
+let capturingKey = false; // dang cho nguoi dung bam phim de doi phim nhan de noi
 const peers = new Map();  // id nguoi khac -> { pc, audio, queue }
 
 // Yeu cau ben kia gui am thanh nhe: mono, ~24 kbps, bat DTX (im lang thi gan nhu khong gui gi)
@@ -304,53 +343,132 @@ function tuneOpus(sdp) {
   return sdp.replace('useinbandfec=1', 'useinbandfec=1;usedtx=1;maxaveragebitrate=24000;stereo=0');
 }
 
+function micMessage(why) {
+  if (why === 'insecure') return 'Khong dung duoc micro vi trang khong phai https hoac localhost. Bạn chỉ nghe được.';
+  if (why === 'NotAllowedError' || why === 'SecurityError') return 'Bạn chưa cho phép micro nên chỉ nghe được. Hãy cho phép micro (Biểu tượng ổ khóa trên thanh địa chỉ), rồi bấm nút "Chỉ nghe" để thử lại.';
+  if (why === 'NotFoundError') return 'Không tìm thấy micro, Bạn chỉ nghe được.';
+  return 'Không mở được micro, bạn chỉ nghe được.';
+}
+
+// Vao voice cua phong hien tai (tu dong khi vao phong, hoac khi bam nut)
 async function joinVoice() {
-  if (inVoice || !socket) return;
-  if (!window.isSecureContext || !navigator.mediaDevices) {
-    alert('Trinh duyet chi cho dung micro tren https:// hoac localhost. Hay mo bang link https cua ban (vi du link Render).');
+  if (inVoice || joining || !socket || !socket.connected) return;
+  joining = true;
+  voiceFull = false;
+  updateVoiceUI();
+  const myRoom = currentRoom;
+
+  let stream = null;
+  let why = '';
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    why = 'insecure';
+  } else {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+        video: false
+      });
+    } catch (e) {
+      why = (e && e.name) || 'error';
+    }
+  }
+
+  // Trong luc cho micro ma da doi phong hoac mat ket noi thi huy
+  if (currentRoom !== myRoom || !socket.connected) {
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    joining = false;
+    updateVoiceUI();
+    if (socket.connected && autoVoice && !inVoice) joinVoice(); // vao voice cua phong moi
     return;
   }
-  try {
-    localStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
-      video: false
-    });
-  } catch (e) {
-    alert('Khong mo duoc micro. Hay cho phep trinh duyet dung micro roi thu lai.');
-    return;
-  }
+
+  localStream = stream;
+  listenOnly = !stream;
   inVoice = true;
+  joining = false;
   muted = false;
-  warnedFail = false;
+  talking = false;
+
+  if (stream) {
+    // Kiem tra trinh duyet co that su bat chong vang khong
+    const s = stream.getAudioTracks()[0].getSettings();
+    if (s.echoCancellation === false) {
+      toastOnce('aec', 'Trình duyệt này không bật được chống vang. Hãy dùng tài nghe hoặc chuyển sang chế độ nhấn để nói.');
+    }
+  } else {
+    toastOnce('nomic:' + why, micMessage(why));
+  }
+
+  applyMic();
   updateVoiceUI();
   socket.emit('voice-join');
 }
 
 // notify = true thi bao cho server biet la minh roi voice
 function leaveVoice(notify) {
-  if (notify && socket) socket.emit('voice-leave');
+  if (notify && socket && socket.connected) socket.emit('voice-leave');
   peers.forEach((_, id) => closePeer(id));
   if (localStream) {
     localStream.getTracks().forEach((t) => t.stop()); // tat han micro
     localStream = null;
   }
   inVoice = false;
+  listenOnly = false;
   muted = false;
+  talking = false;
+  voiceFull = false;
   updateVoiceUI();
 }
 
-function toggleMute() {
+// Bat / tat micro that su theo che do hien tai
+//  - tu dong: mo tru khi minh tat tieng
+//  - nhan de noi: chi mo khi dang giu phim
+function applyMic() {
   if (!localStream) return;
-  muted = !muted;
-  localStream.getAudioTracks().forEach((t) => { t.enabled = !muted; });
+  const on = voiceMode === 'auto' ? !muted : talking;
+  localStream.getAudioTracks().forEach((t) => { t.enabled = on; });
+}
+
+function setTalking(v) {
+  if (voiceMode !== 'ptt' || !localStream || !inVoice) v = false;
+  if (talking === v) return;
+  talking = v;
+  applyMic();
   updateVoiceUI();
 }
 
+function setMode(m) {
+  voiceMode = m;
+  store.set('voiceMode', m);
+  talking = false;
+  applyMic();
+  updateVoiceUI();
+  renderSettings();
+}
+
+// Nut trang thai tren thanh tieu de
 function updateVoiceUI() {
-  $('voiceBtn').textContent = inVoice ? '📞 Roi voice' : '🎧 Voice';
-  $('voiceBtn').classList.toggle('on', inVoice);
-  $('muteBtn').classList.toggle('hidden', !inVoice);
-  $('muteBtn').textContent = muted ? '🔇' : '🎙';
+  const b = $('voiceBtn');
+  b.classList.remove('on', 'talk', 'off', 'warn');
+  let text, tip;
+  if (joining) {
+    text = '⏳ Voice...'; tip = 'Đang vào voice'; b.classList.add('off');
+  } else if (!inVoice) {
+    text = voiceFull ? '🚫 Voice đầy' : '🎧 Bật voice';
+    tip = voiceFull ? 'Voice của phòng này đã đầy, bấm để thử lại' : 'Bấm để vào voice của phòng';
+    b.classList.add('off');
+  } else if (listenOnly) {
+    text = '🎧 Chi nghe'; tip = 'Không có micro. Bấm để thử mở lại micro'; b.classList.add('warn');
+  } else if (voiceMode === 'auto') {
+    if (muted) { text = '🔇 Mic tắt'; tip = ' Bám để bật mic'; b.classList.add('warn'); }
+    else { text = '🎙 Mic mở'; tip = 'Bấm để tắc mic'; b.classList.add('on'); }
+  } else if (talking) {
+    text = '🎤 Đang nói'; tip = 'Thả ra để ngưng nói'; b.classList.add('talk');
+  } else {
+    text = '🎤 Giữ để nói'; tip = 'Giữ nút này (Hoặc phím ' + keyLabel(pttKey) + ') để nói'; b.classList.add('on');
+  }
+  b.textContent = text;
+  b.title = tip;
 }
 
 function closePeer(id) {
@@ -370,7 +488,11 @@ function createPeer(id, initiator) {
   const peer = { pc, audio: null, queue: [] };
   peers.set(id, peer);
 
-  localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+  if (localStream) {
+    localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+  } else if (initiator) {
+    pc.addTransceiver('audio', { direction: 'recvonly' }); // khong co mic: chi nhan
+  }
 
   pc.onicecandidate = (e) => {
     if (e.candidate) {
@@ -382,19 +504,18 @@ function createPeer(id, initiator) {
     if (peer.audio) return;
     const a = document.createElement('audio');
     a.autoplay = true;
-    a.srcObject = e.streams[0];
+    a.srcObject = e.streams[0] || new MediaStream([e.track]);
     $('audioBox').appendChild(a);
-    a.play().catch(() => { /* neu bi chan tu dong phat, nguoi dung bam vao trang la phat */ });
+    a.play().catch(() => {
+      toastOnce('autoplay', 'Trình duyệt đang chặn âm thanh. Hãy bấm vào trang một lần để nghe.');
+    });
     peer.audio = a;
   };
 
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === 'failed' && peers.get(id) === peer) {
       closePeer(id);
-      if (!warnedFail) {
-        warnedFail = true;
-        alert('Khong ket noi duoc am thanh voi mot nguoi trong phong. Co the mang cua ho hoac cua ban can may chu TURN.');
-      }
+      toastOnce('ice', 'Không kết nối được âm thanh với một người trong phòng. Có thể mạng của họ hoặc của bạn cần máy chủ TURN.');
     }
   };
 
@@ -409,7 +530,7 @@ function createPeer(id, initiator) {
           data: { sdp: { type: pc.localDescription.type, sdp: pc.localDescription.sdp } }
         });
       } catch (err) {
-        console.warn('Loi tao loi moi voice', err);
+        console.warn('Lỗi tạo lối mới vocie', err);
       }
     })();
   }
@@ -445,8 +566,142 @@ async function onSignal({ from, data }) {
   }
 }
 
-$('voiceBtn').onclick = () => { if (inVoice) leaveVoice(true); else joinVoice(); };
-$('muteBtn').onclick = toggleMute;
+// ---- Nut tren thanh tieu de ----
+const vb = $('voiceBtn');
+
+// Che do nhan de noi: giu nut de noi (dung duoc ca tren dien thoai)
+vb.addEventListener('pointerdown', (e) => {
+  if (voiceMode === 'ptt' && inVoice && localStream) {
+    e.preventDefault();
+    try { vb.setPointerCapture(e.pointerId); } catch (err) { /* bo qua */ }
+    setTalking(true);
+  }
+});
+vb.addEventListener('pointerup', () => setTalking(false));
+vb.addEventListener('pointercancel', () => setTalking(false));
+vb.addEventListener('contextmenu', (e) => e.preventDefault()); // chan menu khi giu lau tren dien thoai
+
+// Bam (nhan roi tha) nut
+vb.addEventListener('click', () => {
+  if (joining) return;
+  if (!inVoice) { joinVoice(); return; }
+  if (listenOnly) { // thu mo lai micro
+    told = {};
+    leaveVoice(true);
+    joinVoice();
+    return;
+  }
+  if (voiceMode === 'auto') { // tat / bat mic
+    muted = !muted;
+    applyMic();
+    updateVoiceUI();
+  }
+});
+
+// ---- Phim nhan de noi ----
+function keyLabel(code) {
+  const names = {
+    Backquote: '` (bên trái số 1)',
+    ControlLeft: 'Ctrl trai', ControlRight: 'Ctrl phải',
+    AltLeft: 'Alt trai', AltRight: 'Alt phải',
+    ShiftLeft: 'Shift trai', ShiftRight: 'Shift phải',
+    CapsLock: 'Caps Lock'
+  };
+  return names[code] || code;
+}
+
+// Chi cho dung phim khong go ra chu (de khong can tro viec chat)
+function isAllowedPttKey(e) {
+  if (e.code === 'Backquote') return true;
+  const deny = ['Enter', 'Backspace', 'Escape', 'Tab', 'Delete', 'ArrowUp', 'ArrowDown',
+    'ArrowLeft', 'ArrowRight', 'Process', 'Dead', 'Unidentified', 'Meta', 'OS', 'M', 'B', 'V'];
+  if (deny.includes(e.key)) return false;
+  return e.key.length > 1; // phim co ten (Control, Alt, F1...) khong go ra chu
+}
+
+document.addEventListener('keydown', (e) => {
+  // Dang doi phim moi trong hop cai dat
+  if (capturingKey) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.code === 'Escape') { capturingKey = false; renderSettings(); return; }
+    if (!isAllowedPttKey(e)) {
+      toast('phím này không dùng được (sẽ cản trở việc gõ chữ). Hãy chọn phím khác, ví dụ ` , Ctrl, F4...');
+      return;
+    }
+    pttKey = e.code;
+    store.set('pttKey', pttKey);
+    capturingKey = false;
+    renderSettings();
+    updateVoiceUI();
+    return;
+  }
+  // Giu phim de noi
+  if (voiceMode === 'ptt' && inVoice && localStream && e.code === pttKey) {
+    e.preventDefault();
+    if (!e.repeat) setTalking(true);
+  }
+}, true);
+
+document.addEventListener('keyup', (e) => {
+  if (e.code === pttKey && talking) {
+    e.preventDefault();
+    setTalking(false);
+  }
+}, true);
+
+// Tranh bi "ket mic": roi khoi tab / cua so la ngung noi ngay
+window.addEventListener('blur', () => setTalking(false));
+document.addEventListener('visibilitychange', () => { if (document.hidden) setTalking(false); });
+
+// Neu trinh duyet chan tu dong phat am thanh, bam vao trang la phat duoc
+function resumeAudio() {
+  peers.forEach((p) => {
+    if (p.audio && p.audio.paused) p.audio.play().catch(() => { /* bo qua */ });
+  });
+}
+document.addEventListener('pointerdown', resumeAudio, true);
+document.addEventListener('keydown', resumeAudio, true);
+
+// ---- Hop cai dat voice ----
+function renderSettings() {
+  $('optAuto').checked = autoVoice;
+  document.querySelectorAll('input[name="vmode"]').forEach((r) => { r.checked = r.value === voiceMode; });
+  $('pttKeyRow').classList.toggle('hidden', voiceMode !== 'ptt');
+  $('pttKeyBtn').textContent = capturingKey ? 'Nhấn một phím...' : keyLabel(pttKey);
+  $('leaveVoiceBtn').classList.toggle('hidden', !inVoice);
+}
+function closeSettings() {
+  capturingKey = false;
+  $('voiceModal').classList.add('hidden');
+}
+$('settingsBtn').onclick = () => {
+  renderSettings();
+  $('voiceModal').classList.remove('hidden');
+};
+$('closeVoiceModal').onclick = closeSettings;
+$('voiceModal').addEventListener('click', (e) => {
+  if (e.target === $('voiceModal')) closeSettings(); // bam ra vung toi ben ngoai
+});
+$('optAuto').onchange = () => {
+  autoVoice = $('optAuto').checked;
+  store.set('autoVoice', autoVoice ? '1' : '0');
+  if (autoVoice && !inVoice && !joining) joinVoice(); // vua bat thi vao luon
+};
+document.querySelectorAll('input[name="vmode"]').forEach((r) => {
+  r.onchange = () => { if (r.checked) setMode(r.value); };
+});
+$('pttKeyBtn').onclick = () => {
+  capturingKey = true;
+  renderSettings();
+};
+$('leaveVoiceBtn').onclick = () => {
+  leaveVoice(true);
+  renderSettings();
+  toast('Bạn đã rời vioce của phòng này. Bấm nút "Bật voice" hoặc đổi phòng để vào lại.');
+};
+
+updateVoiceUI();
 // ==============================================================
 
 // 11. Neu tab nay da dang nhap truoc do (vd vua bam F5) thi tu vao lai

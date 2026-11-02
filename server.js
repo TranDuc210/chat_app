@@ -289,9 +289,8 @@ io.on('connection', (socket) => {
     if (!currentRoom) return;
     const r = rooms[currentRoom];
     if (!r || r.voice.has(socket.id)) return;
-    if (r.voice.size >= MAX_VOICE) {
-      socket.emit('warn', 'Voice cua phong nay da day (toi da ' + MAX_VOICE + ' nguoi).');
-      socket.emit('voice-denied');
+     if (r.voice.size >= MAX_VOICE) {
+      socket.emit('voice-denied', MAX_VOICE);
       return;
     }
     const peers = [...r.voice];        // nhung nguoi da o trong voice
