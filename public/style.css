@@ -38,3 +38,4 @@ header { padding: 14px 16px; font-weight: 700; border-bottom: 1px solid #1e1f22;
 
 /* Dien thoai: an cot online cho do chat cho */
 @media (max-width: 700px) { #users { display: none; } aside { width: 140px; } }
+#newRoomForm { display: flex; flex-direction: column; gap: 6px; }
