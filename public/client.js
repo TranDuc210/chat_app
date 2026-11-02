@@ -27,7 +27,7 @@ function setupSocket() {
       $('roomList').appendChild(li);
     });
   });
-  socket.on('warn', (text) => alert(text));
+ 
   socket.on('joined', ({ room, history, users }) => {
     currentRoom = room;
     $('roomTitle').textContent = '# ' + room;
@@ -38,9 +38,14 @@ function setupSocket() {
     [...$('roomList').children].forEach((li) =>
       li.classList.toggle('active', li.textContent === '# ' + room));
   });
-
+  socket.on('warn', (text) => alert(text));
   socket.on('msg', addMessage);
   socket.on('users', renderUsers);
+  socket.on('retry-login', () => {
+    socket.disconnect();
+    $('app').classList.add('hidden');
+    $('login').classList.remove('hidden');
+  });
 }
 
 function joinRoom(room) {

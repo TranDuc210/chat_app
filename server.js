@@ -1,47 +1,89 @@
 const express = require('express');
 const http = require('http');
+const fs = require('fs');
 const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
 
-// Tiết kiệm băng thông: chỉ dùng websocket, bật nén dữ liệu
+// Tiet kiem bang thong: chi dung websocket, bat nen du lieu
 const io = new Server(server, {
   transports: ['websocket'],
   perMessageDeflate: { threshold: 256 },
-  maxHttpBufferSize: 2000 // tối đa ~2KB mỗi gói tin
+  maxHttpBufferSize: 2000
 });
 
 app.use(express.static('public'));
 
-const MAX_HISTORY = 50;   // chỉ nhớ 50 tin gần nhất mỗi room
-const MAX_LEN = 500;      // tối đa 500 ký tự mỗi tin
-const rooms = {};         // { tenRoom: { history: [], users: Map(socketId -> ten) } }
+const MAX_HISTORY = 50;       // nho 50 tin gan nhat moi room
+const MAX_LEN = 500;          // toi da 500 ky tu moi tin
+const DATA_FILE = 'data.json';
+const LIMIT = 5, WINDOW_MS = 5000; // chong spam: 5 tin / 5 giay
+
+const rooms = Object.create(null); // { tenRoom: { history: [], users: Map } }
+let dirty = false;                 // true = co du lieu moi chua luu
+
+// ---- Doc du lieu cu tu file khi bat server ----
+try {
+  const saved = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+  for (const name in saved) {
+    rooms[name] = { history: saved[name], users: new Map() };
+  }
+} catch (e) {
+  // chua co file -> bo qua, se tao khi co tin nhan dau tien
+}
+
+// ---- Luu du lieu ra file ----
+function saveNow() {
+  const out = {};
+  for (const name in rooms) out[name] = rooms[name].history;
+  fs.writeFileSync(DATA_FILE, JSON.stringify(out));
+  dirty = false;
+}
+setInterval(() => { if (dirty) saveNow(); }, 5000); // 5 giay kiem tra 1 lan
+process.on('SIGINT', () => {                         // khi bam Ctrl + C
+  if (dirty) saveNow();
+  process.exit();
+});
 
 function getRoom(name) {
-  if (!rooms[name]) rooms[name] = { history: [], users: new Map() };
+  if (!rooms[name]) {
+    rooms[name] = { history: [], users: new Map() };
+    dirty = true;
+  }
   return rooms[name];
 }
 
-// Dọn chuỗi: cắt độ dài, bỏ khoảng trắng thừa
 function clean(text, max) {
   return String(text || '').trim().slice(0, max);
 }
 
-getRoom('chung'); // tạo sẵn 1 room mặc định
+getRoom('chung'); // dam bao luon co room mac dinh
 
 io.on('connection', (socket) => {
   let currentRoom = null;
   let username = 'Khach';
+  let recent = []; // thoi diem cac tin gan day cua nguoi nay (chong spam)
 
-  // Gửi danh sách room cho người mới vào
   socket.emit('rooms', Object.keys(rooms));
 
   socket.on('join', ({ name, room }) => {
-    username = clean(name, 20) || 'Khach';
+    const newName = clean(name, 20) || 'Khach';
     const roomName = clean(room, 20).toLowerCase() || 'chung';
 
-    // Rời room cũ (nếu có)
+    // Kiem tra trung ten trong room dich (bo qua chinh minh)
+    const existing = rooms[roomName];
+    if (existing) {
+      for (const [id, n] of existing.users) {
+        if (id !== socket.id && n.toLowerCase() === newName.toLowerCase()) {
+          socket.emit('warn', 'Ten "' + newName + '" da co nguoi dung trong phong nay.');
+          if (!currentRoom) socket.emit('retry-login'); // chua vao phong nao -> ve man hinh dang nhap
+          return;
+        }
+      }
+    }
+
+    username = newName;
     if (currentRoom) leave();
 
     currentRoom = roomName;
@@ -49,25 +91,19 @@ io.on('connection', (socket) => {
     r.users.set(socket.id, username);
     socket.join(roomName);
 
-    // Gửi lịch sử + danh sách người cho người vừa vào
     socket.emit('joined', {
       room: roomName,
       history: r.history,
       users: [...r.users.values()]
     });
-
-    // Báo cho người trong room
     socket.to(roomName).emit('users', [...r.users.values()]);
-    // Báo danh sách room mới cho tất cả (nếu có room mới)
     io.emit('rooms', Object.keys(rooms));
   });
-
-  let recent = [];
-  const LIMIT = 5, WINDOW_MS = 5000;
 
   socket.on('msg', (text) => {
     if (!currentRoom) return;
 
+    // Chong spam
     const now = Date.now();
     recent = recent.filter((t) => now - t < WINDOW_MS);
     if (recent.length >= LIMIT) {
@@ -75,13 +111,15 @@ io.on('connection', (socket) => {
       return;
     }
     recent.push(now);
+
     const content = clean(text, MAX_LEN);
     if (!content) return;
 
-    const m = { u: username, t: content, ts: Date.now() }; // key ngắn cho nhẹ
+    const m = { u: username, t: content, ts: Date.now() };
     const r = getRoom(currentRoom);
     r.history.push(m);
     if (r.history.length > MAX_HISTORY) r.history.shift();
+    dirty = true; // danh dau can luu
 
     io.to(currentRoom).emit('msg', m);
   });
