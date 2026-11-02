@@ -62,8 +62,19 @@ io.on('connection', (socket) => {
     io.emit('rooms', Object.keys(rooms));
   });
 
+  let recent = [];
+  const LIMIT = 5, WINDOW_MS = 5000;
+
   socket.on('msg', (text) => {
     if (!currentRoom) return;
+
+    const now = Date.now();
+    recent = recent.filter((t) => now - t < WINDOW_MS);
+    if (recent.length >= LIMIT) {
+      socket.emit('warn', 'Ban gui qua nhanh, vui long cho chut.');
+      return;
+    }
+    recent.push(now);
     const content = clean(text, MAX_LEN);
     if (!content) return;
 

@@ -27,7 +27,7 @@ function setupSocket() {
       $('roomList').appendChild(li);
     });
   });
-
+  socket.on('warn', (text) => alert(text));
   socket.on('joined', ({ room, history, users }) => {
     currentRoom = room;
     $('roomTitle').textContent = '# ' + room;
