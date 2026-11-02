@@ -1,6 +1,7 @@
 const express = require('express');
 const http = require('http');
 const fs = require('fs');
+const crypto = require('crypto');
 const { Server } = require('socket.io');
 
 const app = express();
@@ -15,68 +16,122 @@ const io = new Server(server, {
 
 app.use(express.static('public'));
 
-const MAX_HISTORY = 50;       // nho 50 tin gan nhat moi room
-const MAX_LEN = 500;          // toi da 500 ky tu moi tin
+const MAX_HISTORY = 50;            // nho 50 tin gan nhat moi room
+const MAX_LEN = 500;               // toi da 500 ky tu moi tin
 const DATA_FILE = 'data.json';
 const LIMIT = 5, WINDOW_MS = 5000; // chong spam: 5 tin / 5 giay
+const MAX_PASS_FAILS = 5;          // sai mat khau 5 lan thi ngat ket noi
 
-const rooms = Object.create(null); // { tenRoom: { history: [], users: Map } }
-let dirty = false;                 // true = co du lieu moi chua luu
+// rooms = { tenRoom: { history: [], users: Map, salt, hash } }
+// salt + hash chi co khi room co mat khau
+const rooms = Object.create(null);
+let dirty = false;
 const cidOf = new Map(); // socket.id -> ma nhan dang cua tab trinh duyet
+
+// ---- Mat khau: chi luu ban bam (hash), khong luu chu that ----
+function hashPass(pass, salt) {
+  return crypto.scryptSync(pass, salt, 32).toString('hex');
+}
+function makeSecret(pass) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  return { salt, hash: hashPass(pass, salt) };
+}
+function checkPass(room, pass) {
+  if (!room.hash) return true; // room khong co mat khau
+  const a = Buffer.from(hashPass(String(pass || ''), room.salt), 'hex');
+  const b = Buffer.from(room.hash, 'hex');
+  return crypto.timingSafeEqual(a, b);
+}
+
 // ---- Doc du lieu cu tu file khi bat server ----
 try {
   const saved = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   for (const name in saved) {
-    rooms[name] = { history: saved[name], users: new Map() };
+    const s = saved[name];
+    if (Array.isArray(s)) {
+      // dinh dang cu (chi co lich su)
+      rooms[name] = { history: s, users: new Map() };
+    } else {
+      rooms[name] = { history: s.history || [], salt: s.salt, hash: s.hash, users: new Map() };
+    }
   }
 } catch (e) {
-  // chua co file -> bo qua, se tao khi co tin nhan dau tien
+  // chua co file -> bo qua
 }
 
 // ---- Luu du lieu ra file ----
 function saveNow() {
   const out = {};
-  for (const name in rooms) out[name] = rooms[name].history;
+  for (const name in rooms) {
+    const r = rooms[name];
+    out[name] = { history: r.history, salt: r.salt, hash: r.hash };
+  }
   fs.writeFileSync(DATA_FILE, JSON.stringify(out));
   dirty = false;
 }
-setInterval(() => { if (dirty) saveNow(); }, 5000); // 5 giay kiem tra 1 lan
-process.on('SIGINT', () => {                         // khi bam Ctrl + C
+setInterval(() => { if (dirty) saveNow(); }, 5000);
+process.on('SIGINT', () => {
   if (dirty) saveNow();
   process.exit();
 });
 
-function getRoom(name) {
+function getRoom(name, pass) {
   if (!rooms[name]) {
     rooms[name] = { history: [], users: new Map() };
+    if (pass) Object.assign(rooms[name], makeSecret(pass));
     dirty = true;
   }
   return rooms[name];
+}
+
+// Danh sach room gui cho client: [[ten, 1 neu co khoa], ...]
+function roomList() {
+  return Object.keys(rooms).map((n) => [n, rooms[n].hash ? 1 : 0]);
 }
 
 function clean(text, max) {
   return String(text || '').trim().slice(0, max);
 }
 
-getRoom('chung'); // dam bao luon co room mac dinh
+getRoom('chung'); // room mac dinh, khong mat khau
 
 io.on('connection', (socket) => {
   let currentRoom = null;
   let username = 'Khach';
-  let recent = []; // thoi diem cac tin gan day cua nguoi nay (chong spam)
+  let recent = [];   // chong spam
+  let failCount = 0; // so lan sai mat khau
 
-  socket.emit('rooms', Object.keys(rooms));
+  socket.emit('rooms', roomList());
 
-    socket.on('join', ({ name, room, pass, cid }) => {
+  socket.on('join', ({ name, room, pass, cid }) => {
     const myCid = clean(cid, 40);
     cidOf.set(socket.id, myCid);
     const newName = clean(name, 20) || 'Khach';
     const roomName = clean(room, 20).toLowerCase() || 'chung';
+    const passText = clean(pass, 50);
 
-    // Kiem tra trung ten trong room dich (bo qua chinh minh)
     const existing = rooms[roomName];
     if (existing) {
-    for (const [id, n] of [...existing.users]) {
+      // 0. Phong da ton tai va dang mo -> khong the dat mat khau cho no
+      if (!existing.hash && passText) {
+        socket.emit('warn', 'Phong "' + roomName + '" da ton tai va khong co mat khau. Hay dung ten phong khac de tao phong rieng tu.');
+        if (!currentRoom) socket.emit('retry-login');
+        return;
+      }
+      // 1. Kiem tra mat khau
+      if (existing.hash && !checkPass(existing, passText)) {
+        failCount++;
+        if (failCount >= MAX_PASS_FAILS) {
+          socket.emit('warn', 'Ban nhap sai mat khau qua nhieu lan.');
+          socket.disconnect();
+          return;
+        }
+        socket.emit('warn', 'Sai mat khau cua phong "' + roomName + '".');
+        if (!currentRoom) socket.emit('retry-login');
+        return;
+      }
+      // 2. Kiem tra trung ten (bo qua chinh minh)
+      for (const [id, n] of [...existing.users]) {
         if (id !== socket.id && n.toLowerCase() === newName.toLowerCase()) {
           // Ket noi cu cua CHINH tab nay (vd sau khi bam F5) -> dong no lai, cho vao
           if (myCid && cidOf.get(id) === myCid) {
@@ -95,7 +150,7 @@ io.on('connection', (socket) => {
     if (currentRoom) leave();
 
     currentRoom = roomName;
-    const r = getRoom(roomName);
+    const r = getRoom(roomName, passText); // neu room chua co thi tao, kem mat khau (neu co)
     r.users.set(socket.id, username);
     socket.join(roomName);
 
@@ -105,13 +160,12 @@ io.on('connection', (socket) => {
       users: [...r.users.values()]
     });
     socket.to(roomName).emit('users', [...r.users.values()]);
-    io.emit('rooms', Object.keys(rooms));
+    io.emit('rooms', roomList());
   });
 
   socket.on('msg', (text) => {
     if (!currentRoom) return;
 
-    // Chong spam
     const now = Date.now();
     recent = recent.filter((t) => now - t < WINDOW_MS);
     if (recent.length >= LIMIT) {
@@ -127,7 +181,7 @@ io.on('connection', (socket) => {
     const r = getRoom(currentRoom);
     r.history.push(m);
     if (r.history.length > MAX_HISTORY) r.history.shift();
-    dirty = true; // danh dau can luu
+    dirty = true;
 
     io.to(currentRoom).emit('msg', m);
   });
