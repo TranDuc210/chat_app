@@ -16,13 +16,20 @@ const io = new Server(server, {
 
 app.use(express.static('public'));
 
-const MAX_HISTORY = 50;            // nho 50 tin gan nhat moi room
-const MAX_LEN = 500;               // toi da 500 ky tu moi tin
+// ====== CAC GIOI HAN (muon doi thi sua o day) ======
+const MAX_HISTORY = 50;                 // nho 50 tin gan nhat moi room
+const MAX_LEN = 500;                    // toi da 500 ky tu moi tin
+const LIMIT = 5, WINDOW_MS = 5000;      // chong spam: 5 tin / 5 giay
+const MAX_PASS_FAILS = 5;               // sai mat khau 5 lan thi ngat ket noi
+const MAX_ROOMS = 30;                   // so phong toi da
+const CREATE_LIMIT = 3;                 // moi nguoi tao toi da 3 phong...
+const CREATE_WINDOW_MS = 60 * 1000;     // ...trong 1 phut
+const ROOM_TTL_MS = 6 * 60 * 60 * 1000; // phong trong 6 gio se bi xoa
+const SWEEP_MS = 10 * 60 * 1000;        // 10 phut quet phong trong 1 lan
+const ROOM_NAME_RE = /^[\p{L}\p{N}_-]+$/u; // chu cai, so, gach ngang, gach duoi
 const DATA_FILE = 'data.json';
-const LIMIT = 5, WINDOW_MS = 5000; // chong spam: 5 tin / 5 giay
-const MAX_PASS_FAILS = 5;          // sai mat khau 5 lan thi ngat ket noi
 
-// rooms = { tenRoom: { history: [], users: Map, salt, hash } }
+// rooms = { tenRoom: { history: [], users: Map, salt, hash, emptySince } }
 // salt + hash chi co khi room co mat khau
 const rooms = Object.create(null);
 let dirty = false;
@@ -50,9 +57,12 @@ try {
     const s = saved[name];
     if (Array.isArray(s)) {
       // dinh dang cu (chi co lich su)
-      rooms[name] = { history: s, users: new Map() };
+      rooms[name] = { history: s, users: new Map(), emptySince: Date.now() };
     } else {
-      rooms[name] = { history: s.history || [], salt: s.salt, hash: s.hash, users: new Map() };
+      rooms[name] = {
+        history: s.history || [], salt: s.salt, hash: s.hash,
+        users: new Map(), emptySince: Date.now()
+      };
     }
   }
 } catch (e) {
@@ -77,7 +87,7 @@ process.on('SIGINT', () => {
 
 function getRoom(name, pass) {
   if (!rooms[name]) {
-    rooms[name] = { history: [], users: new Map() };
+    rooms[name] = { history: [], users: new Map(), emptySince: null };
     if (pass) Object.assign(rooms[name], makeSecret(pass));
     dirty = true;
   }
@@ -95,13 +105,38 @@ function clean(text, max) {
 
 getRoom('chung'); // room mac dinh, khong mat khau
 
+// ---- Tu dong xoa phong trong qua lau (tru phong 'chung') ----
+setInterval(() => {
+  const now = Date.now();
+  let removed = false;
+  for (const name in rooms) {
+    if (name === 'chung') continue;
+    const r = rooms[name];
+    if (r.users.size === 0 && r.emptySince && now - r.emptySince > ROOM_TTL_MS) {
+      delete rooms[name];
+      removed = true;
+    }
+  }
+  if (removed) {
+    dirty = true;
+    io.emit('rooms', roomList());
+  }
+}, SWEEP_MS);
+
 io.on('connection', (socket) => {
   let currentRoom = null;
   let username = 'Khach';
-  let recent = [];   // chong spam
-  let failCount = 0; // so lan sai mat khau
+  let recent = [];       // chong spam tin nhan
+  let failCount = 0;     // so lan sai mat khau
+  let createTimes = [];  // thoi diem cac lan tao phong moi
 
   socket.emit('rooms', roomList());
+
+  // Gui canh bao; neu nguoi nay chua vao phong nao thi dua ve man hinh dang nhap
+  function reject(text) {
+    socket.emit('warn', text);
+    if (!currentRoom) socket.emit('retry-login');
+  }
 
   socket.on('join', ({ name, room, pass, cid }) => {
     const myCid = clean(cid, 40);
@@ -110,15 +145,30 @@ io.on('connection', (socket) => {
     const roomName = clean(room, 20).toLowerCase() || 'chung';
     const passText = clean(pass, 50);
 
+    // 0. Kiem tra ten phong hop le
+    if (!ROOM_NAME_RE.test(roomName)) {
+      return reject('Ten phong chi duoc dung chu cai, so, dau gach ngang (-) va gach duoi (_).');
+    }
+
     const existing = rooms[roomName];
-    if (existing) {
-      // 0. Phong da ton tai va dang mo -> khong the dat mat khau cho no
-      if (!existing.hash && passText) {
-        socket.emit('warn', 'Phong "' + roomName + '" da ton tai va khong co mat khau. Hay dung ten phong khac de tao phong rieng tu.');
-        if (!currentRoom) socket.emit('retry-login');
-        return;
+
+    if (!existing) {
+      // Dang tao phong MOI -> kiem tra cac gioi han
+      if (Object.keys(rooms).length >= MAX_ROOMS) {
+        return reject('May chu da dat so phong toi da (' + MAX_ROOMS + '). Hay vao mot phong co san.');
       }
-      // 1. Kiem tra mat khau
+      const now = Date.now();
+      createTimes = createTimes.filter((t) => now - t < CREATE_WINDOW_MS);
+      if (createTimes.length >= CREATE_LIMIT) {
+        return reject('Ban tao phong qua nhanh, vui long cho chut.');
+      }
+    } else {
+      // Phong da co
+      // a. Phong dang mo thi khong the dat mat khau cho no
+      if (!existing.hash && passText) {
+        return reject('Phong "' + roomName + '" da ton tai va khong co mat khau. Hay dung ten phong khac de tao phong rieng tu.');
+      }
+      // b. Kiem tra mat khau
       if (existing.hash && !checkPass(existing, passText)) {
         failCount++;
         if (failCount >= MAX_PASS_FAILS) {
@@ -126,11 +176,9 @@ io.on('connection', (socket) => {
           socket.disconnect();
           return;
         }
-        socket.emit('warn', 'Sai mat khau cua phong "' + roomName + '".');
-        if (!currentRoom) socket.emit('retry-login');
-        return;
+        return reject('Sai mat khau cua phong "' + roomName + '".');
       }
-      // 2. Kiem tra trung ten (bo qua chinh minh)
+      // c. Kiem tra trung ten (bo qua chinh minh)
       for (const [id, n] of [...existing.users]) {
         if (id !== socket.id && n.toLowerCase() === newName.toLowerCase()) {
           // Ket noi cu cua CHINH tab nay (vd sau khi bam F5) -> dong no lai, cho vao
@@ -139,19 +187,21 @@ io.on('connection', (socket) => {
             if (old) old.disconnect(true);
             continue;
           }
-          socket.emit('warn', 'Ten "' + newName + '" da co nguoi dung trong phong nay.');
-          if (!currentRoom) socket.emit('retry-login');
-          return;
+          return reject('Ten "' + newName + '" da co nguoi dung trong phong nay.');
         }
       }
     }
+
+    // ---- Moi kiem tra deu qua: vao phong ----
+    if (!existing) createTimes.push(Date.now()); // tinh vao han muc tao phong
 
     username = newName;
     if (currentRoom) leave();
 
     currentRoom = roomName;
-    const r = getRoom(roomName, passText); // neu room chua co thi tao, kem mat khau (neu co)
+    const r = getRoom(roomName, passText); // neu chua co thi tao, kem mat khau (neu co)
     r.users.set(socket.id, username);
+    r.emptySince = null;
     socket.join(roomName);
 
     socket.emit('joined', {
@@ -190,6 +240,7 @@ io.on('connection', (socket) => {
     const r = rooms[currentRoom];
     if (!r) return;
     r.users.delete(socket.id);
+    if (r.users.size === 0) r.emptySince = Date.now(); // bat dau dem gio phong trong
     socket.leave(currentRoom);
     io.to(currentRoom).emit('users', [...r.users.values()]);
   }

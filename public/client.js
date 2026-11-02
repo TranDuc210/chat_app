@@ -142,7 +142,7 @@ $('msgForm').addEventListener('submit', (e) => {
 // 5. Tao phong moi (hoac vao phong da co)
 $('newRoomForm').addEventListener('submit', (e) => {
   e.preventDefault();
-  const name = $('newRoomInput').value.trim().toLowerCase();
+ const name = $('newRoomInput').value.trim().toLowerCase().replace(/\s+/g, '-');
   const pass = $('newRoomPass').value;
   if (!name) return;
   $('newRoomInput').value = '';
