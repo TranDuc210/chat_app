@@ -70,7 +70,7 @@ function setupSocket() {
   });
 
   socket.on('msg', addMessage);
-  socket.on('users', renderUsers);
+  socket.on('sys', addSystem);
   socket.on('warn', (text) => alert(text));
   socket.on('retry-login', () => {
     currentRoom = 'chung';
@@ -117,8 +117,22 @@ function addMessage(m) {
   body.append(head, text);
   div.append(avatar, body);
 
+    pushToBox(div);
+}
+
+// Thong bao he thong (vao / roi phong)
+function addSystem(text) {
+  const div = document.createElement('div');
+  div.className = 'sys';
+  div.textContent = text; // textContent: an toan
+  pushToBox(div);
+}
+
+// Them mot dong vao khung chat, chi giu 200 dong gan nhat cho nhe may
+function pushToBox(el) {
   const box = $('messages');
-  box.appendChild(div);
+  box.appendChild(el);
+  while (box.children.length > 200) box.removeChild(box.firstChild);
   box.scrollTop = box.scrollHeight;
 }
 
