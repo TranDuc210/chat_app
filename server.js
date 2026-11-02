@@ -8,10 +8,11 @@ const app = express();
 const server = http.createServer(app);
 
 // Tiet kiem bang thong: chi dung websocket, bat nen du lieu
+// maxHttpBufferSize = 20000: du cho cac goi "thuong luong" voice (SDP) di qua server
 const io = new Server(server, {
   transports: ['websocket'],
   perMessageDeflate: { threshold: 256 },
-  maxHttpBufferSize: 2000
+  maxHttpBufferSize: 20000
 });
 
 app.use(express.static('public'));
@@ -19,6 +20,9 @@ app.use(express.static('public'));
 // ====== CAC GIOI HAN (muon doi thi sua o day) ======
 const SHOW_SYS_MSG = false;             // true = hien dong "X da vao/roi phong" trong khung chat
 const MAX_SHOWN = 8;                    // moi phong hien toi da 8 nguoi duoi ten phong
+const MAX_VOICE = 4;                    // toi da 4 nguoi trong voice moi phong
+const SIGNAL_LIMIT = 200;               // toi da 200 goi thuong luong voice...
+const SIGNAL_WINDOW_MS = 10 * 1000;     // ...trong 10 giay
 const MAX_HISTORY = 50;                 // nho 50 tin gan nhat moi room
 const MAX_LEN = 500;                    // toi da 500 ky tu moi tin
 const LIMIT = 5, WINDOW_MS = 5000;      // chong spam: 5 tin / 5 giay
@@ -33,7 +37,7 @@ const SWEEP_MS = 10 * 60 * 1000;        // 10 phut quet phong trong 1 lan
 const ROOM_NAME_RE = /^[\p{L}\p{N}_-]+$/u; // chu cai, so, gach ngang, gach duoi
 const DATA_FILE = 'data.json';
 
-// rooms = { tenRoom: { history: [], users: Map, salt, hash, emptySince } }
+// rooms = { tenRoom: { history: [], users: Map, voice: Set, salt, hash, emptySince } }
 // salt + hash chi co khi room co mat khau
 const rooms = Object.create(null);
 let dirty = false;
@@ -61,11 +65,11 @@ try {
     const s = saved[name];
     if (Array.isArray(s)) {
       // dinh dang cu (chi co lich su)
-      rooms[name] = { history: s, users: new Map(), emptySince: Date.now() };
+      rooms[name] = { history: s, users: new Map(), voice: new Set(), emptySince: Date.now() };
     } else {
       rooms[name] = {
         history: s.history || [], salt: s.salt, hash: s.hash,
-        users: new Map(), emptySince: Date.now()
+        users: new Map(), voice: new Set(), emptySince: Date.now()
       };
     }
   }
@@ -91,7 +95,7 @@ process.on('SIGINT', () => {
 
 function getRoom(name, pass) {
   if (!rooms[name]) {
-    rooms[name] = { history: [], users: new Map(), emptySince: null };
+    rooms[name] = { history: [], users: new Map(), voice: new Set(), emptySince: null };
     if (pass) Object.assign(rooms[name], makeSecret(pass));
     dirty = true;
   }
@@ -107,6 +111,11 @@ function roomList() {
     const names = [...r.users.values()];
     return [n, 0, names.slice(0, MAX_SHOWN), names.length];
   });
+}
+
+// Ten nhung nguoi dang trong voice cua mot phong
+function voiceNames(r) {
+  return [...r.voice].map((id) => r.users.get(id)).filter(Boolean);
 }
 
 // Gom nhieu thay doi lai, 0,3 giay moi gui 1 lan cho moi nguoi (do ton bang thong)
@@ -150,6 +159,7 @@ io.on('connection', (socket) => {
   let failCount = 0;     // so lan sai mat khau
   let createTimes = [];  // thoi diem cac lan tao phong moi
   let joinTimes = [];    // thoi diem cac lan vao/doi phong
+  let signalTimes = [];  // thoi diem cac goi thuong luong voice
 
   socket.emit('rooms', roomList());
 
@@ -230,7 +240,7 @@ io.on('connection', (socket) => {
     // ---- Moi kiem tra deu qua: vao phong ----
     if (!existing) createTimes.push(Date.now()); // tinh vao han muc tao phong
 
-    if (currentRoom) leave(false); // roi phong cu
+    if (currentRoom) leave(false); // roi phong cu (dong thoi roi voice cua phong cu)
     username = newName;
 
     currentRoom = roomName;
@@ -242,7 +252,8 @@ io.on('connection', (socket) => {
     socket.emit('joined', {
       room: roomName,
       history: r.history,
-      users: [...r.users.values()]
+      users: [...r.users.values()],
+      voice: voiceNames(r)
     });
     socket.to(roomName).emit('users', [...r.users.values()]);
     if (SHOW_SYS_MSG && !replaced) socket.to(roomName).emit('sys', username + ' da vao phong');
@@ -272,10 +283,55 @@ io.on('connection', (socket) => {
     io.to(currentRoom).emit('msg', m);
   });
 
+  // ================= VOICE =================
+  // Vao voice cua phong hien tai
+  socket.on('voice-join', () => {
+    if (!currentRoom) return;
+    const r = rooms[currentRoom];
+    if (!r || r.voice.has(socket.id)) return;
+    if (r.voice.size >= MAX_VOICE) {
+      socket.emit('warn', 'Voice cua phong nay da day (toi da ' + MAX_VOICE + ' nguoi).');
+      socket.emit('voice-denied');
+      return;
+    }
+    const peers = [...r.voice];        // nhung nguoi da o trong voice
+    r.voice.add(socket.id);
+    socket.emit('voice-peers', peers); // nguoi moi se chu dong goi cho tung nguoi
+    io.to(currentRoom).emit('voice-users', voiceNames(r));
+  });
+
+  socket.on('voice-leave', () => leaveVoice());
+
+  // Chuyen tiep goi "thuong luong" giua 2 nguoi trong CUNG voice cua CUNG phong
+  socket.on('voice-signal', (payload) => {
+    const { to, data } = payload || {};
+    if (!currentRoom || typeof to !== 'string' || to === socket.id) return;
+    const r = rooms[currentRoom];
+    if (!r || !r.voice.has(socket.id) || !r.voice.has(to)) return;
+
+    const now = Date.now();
+    signalTimes = signalTimes.filter((t) => now - t < SIGNAL_WINDOW_MS);
+    if (signalTimes.length >= SIGNAL_LIMIT) return;
+    signalTimes.push(now);
+
+    if (!data || typeof data !== 'object') return;
+    if (JSON.stringify(data).length > 8000) return;
+    io.to(to).emit('voice-signal', { from: socket.id, data });
+  });
+
+  function leaveVoice() {
+    const r = rooms[currentRoom];
+    if (!r || !r.voice.delete(socket.id)) return;
+    io.to(currentRoom).emit('voice-peer-left', socket.id);
+    io.to(currentRoom).emit('voice-users', voiceNames(r));
+  }
+  // =========================================
+
   // silent = true thi khong gui thong bao "da roi phong"
   function leave(silent) {
     const r = rooms[currentRoom];
     if (!r) return;
+    leaveVoice(); // roi voice truoc khi roi phong
     r.users.delete(socket.id);
     if (r.users.size === 0) r.emptySince = Date.now(); // bat dau dem gio phong trong
     socket.leave(currentRoom);

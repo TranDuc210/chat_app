@@ -5,6 +5,7 @@ let currentRoom = 'chung', currentPass = ''; // phong va mat khau dang o
 let tryPass = '';                             // mat khau dang thu
 let lastRooms = [];                           // danh sach phong moi nhat tu server
 let currentUsers = [];                        // nguoi dang o trong phong hien tai
+let voiceNames = [];                          // nguoi dang trong voice cua phong hien tai
 
 // Ma nhan dang cua tab nay (giu nguyen khi bam F5, moi tab mot ma)
 let cid = sessionStorage.getItem('cid');
@@ -22,8 +23,8 @@ function colorOf(name) {
 function initialOf(name) {
   return ([...name][0] || '?').toUpperCase();
 }
-// Mot "the" gom icon tron + ten
-function makeChip(name) {
+// Mot "the" gom icon tron + ten (+ bieu tuong micro neu dang trong voice)
+function makeChip(name, inVoiceNow) {
   const chip = document.createElement('div');
   chip.className = 'chip';
   const dot = document.createElement('span');
@@ -34,6 +35,12 @@ function makeChip(name) {
   label.className = 'cname';
   label.textContent = name; // textContent: an toan
   chip.append(dot, label);
+  if (inVoiceNow) {
+    const badge = document.createElement('span');
+    badge.className = 'vbadge';
+    badge.textContent = '🎙';
+    chip.appendChild(badge);
+  }
   return chip;
 }
 
@@ -66,6 +73,7 @@ function setupSocket() {
   socket.on('connect', () => requestJoin(currentRoom, currentPass));
 
   socket.on('disconnect', (reason) => {
+    leaveVoice(false); // mat ket noi thi tu roi voice
     const note = reason === 'io server disconnect'
       ? '(bi ngat ket noi, hay tai lai trang)'
       : '(mat ket noi, dang thu lai...)';
@@ -77,9 +85,12 @@ function setupSocket() {
     renderRooms();
   });
 
-  socket.on('joined', ({ room, history, users }) => {
+  socket.on('joined', ({ room, history, users, voice }) => {
+    // Moi lan vao/doi phong, server deu xoa ban khoi voice -> client cung phai roi voice
+    if (inVoice) leaveVoice(false);
     currentRoom = room;
     currentPass = tryPass; // nho mat khau de tu vao lai khi mat ket noi
+    voiceNames = voice || [];
     $('roomTitle').textContent = '# ' + room;
     $('messages').innerHTML = '';
     history.forEach(addMessage);
@@ -92,14 +103,29 @@ function setupSocket() {
   socket.on('sys', addSystem);
   socket.on('warn', (text) => alert(text));
   socket.on('retry-login', () => {
+    leaveVoice(false);
     currentRoom = 'chung';
     currentPass = '';
     currentUsers = [];
+    voiceNames = [];
     sessionStorage.removeItem('name'); // quen ten de khong bi lap vo han
     socket.disconnect();
     $('app').classList.add('hidden');
     $('login').classList.remove('hidden');
   });
+
+  // ---- Su kien voice tu server ----
+  socket.on('voice-users', (names) => {
+    voiceNames = names;
+    renderUsers(currentUsers);
+  });
+  socket.on('voice-peers', (ids) => {
+    if (!inVoice) return;
+    ids.forEach((id) => createPeer(id, true)); // nguoi moi vao thi chu dong goi cho tung nguoi
+  });
+  socket.on('voice-signal', onSignal);
+  socket.on('voice-peer-left', (id) => closePeer(id));
+  socket.on('voice-denied', () => leaveVoice(false));
 }
 
 function joinRoom(room, locked) {
@@ -134,7 +160,8 @@ function renderRooms() {
     if (list.length) {
       const members = document.createElement('div');
       members.className = 'members';
-      list.slice(0, MAX_SHOWN).forEach((n) => members.appendChild(makeChip(n)));
+      list.slice(0, MAX_SHOWN).forEach((n) =>
+        members.appendChild(makeChip(n, isCur && voiceNames.includes(n))));
       if (count > MAX_SHOWN) {
         const more = document.createElement('div');
         more.className = 'more';
@@ -198,7 +225,7 @@ function renderUsers(users) {
   $('userList').innerHTML = '';
   users.forEach((u) => {
     const li = document.createElement('li');
-    li.appendChild(makeChip(u));
+    li.appendChild(makeChip(u, voiceNames.includes(u)));
     $('userList').appendChild(li);
   });
   renderRooms();
@@ -257,7 +284,172 @@ $('menuBtn').onclick = () => togglePanel('rooms');
 $('usersBtn').onclick = () => togglePanel('users');
 $('backdrop').onclick = closePanels;
 
-// 9. Neu tab nay da dang nhap truoc do (vd vua bam F5) thi tu vao lai
+// 9. (de trong, giu so thu tu)
+
+// ===================== 10. VOICE (WebRTC) =====================
+// May chu STUN giup 2 may tim thay nhau. Neu mang khat khe (4G, hotspot...) co the can them
+// may chu TURN: them mot dong { urls: 'turn:...', username: '...', credential: '...' } vao day.
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' }
+];
+
+let localStream = null;   // micro cua minh
+let inVoice = false;      // dang trong voice hay khong
+let muted = false;        // dang tat mic hay khong
+let warnedFail = false;   // chi bao loi ket noi 1 lan moi phien voice
+const peers = new Map();  // id nguoi khac -> { pc, audio, queue }
+
+// Yeu cau ben kia gui am thanh nhe: mono, ~24 kbps, bat DTX (im lang thi gan nhu khong gui gi)
+function tuneOpus(sdp) {
+  return sdp.replace('useinbandfec=1', 'useinbandfec=1;usedtx=1;maxaveragebitrate=24000;stereo=0');
+}
+
+async function joinVoice() {
+  if (inVoice || !socket) return;
+  if (!window.isSecureContext || !navigator.mediaDevices) {
+    alert('Trinh duyet chi cho dung micro tren https:// hoac localhost. Hay mo bang link https cua ban (vi du link Render).');
+    return;
+  }
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+      video: false
+    });
+  } catch (e) {
+    alert('Khong mo duoc micro. Hay cho phep trinh duyet dung micro roi thu lai.');
+    return;
+  }
+  inVoice = true;
+  muted = false;
+  warnedFail = false;
+  updateVoiceUI();
+  socket.emit('voice-join');
+}
+
+// notify = true thi bao cho server biet la minh roi voice
+function leaveVoice(notify) {
+  if (notify && socket) socket.emit('voice-leave');
+  peers.forEach((_, id) => closePeer(id));
+  if (localStream) {
+    localStream.getTracks().forEach((t) => t.stop()); // tat han micro
+    localStream = null;
+  }
+  inVoice = false;
+  muted = false;
+  updateVoiceUI();
+}
+
+function toggleMute() {
+  if (!localStream) return;
+  muted = !muted;
+  localStream.getAudioTracks().forEach((t) => { t.enabled = !muted; });
+  updateVoiceUI();
+}
+
+function updateVoiceUI() {
+  $('voiceBtn').textContent = inVoice ? '📞 Roi voice' : '🎧 Voice';
+  $('voiceBtn').classList.toggle('on', inVoice);
+  $('muteBtn').classList.toggle('hidden', !inVoice);
+  $('muteBtn').textContent = muted ? '🔇' : '🎙';
+}
+
+function closePeer(id) {
+  const peer = peers.get(id);
+  if (!peer) return;
+  peers.delete(id);
+  try { peer.pc.close(); } catch (e) { /* bo qua */ }
+  if (peer.audio) {
+    peer.audio.srcObject = null;
+    peer.audio.remove();
+  }
+}
+
+// Tao ket noi truc tiep voi 1 nguoi. initiator = true thi minh la ben goi truoc.
+function createPeer(id, initiator) {
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const peer = { pc, audio: null, queue: [] };
+  peers.set(id, peer);
+
+  localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      socket.emit('voice-signal', { to: id, data: { candidate: e.candidate.toJSON() } });
+    }
+  };
+
+  pc.ontrack = (e) => {
+    if (peer.audio) return;
+    const a = document.createElement('audio');
+    a.autoplay = true;
+    a.srcObject = e.streams[0];
+    $('audioBox').appendChild(a);
+    a.play().catch(() => { /* neu bi chan tu dong phat, nguoi dung bam vao trang la phat */ });
+    peer.audio = a;
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'failed' && peers.get(id) === peer) {
+      closePeer(id);
+      if (!warnedFail) {
+        warnedFail = true;
+        alert('Khong ket noi duoc am thanh voi mot nguoi trong phong. Co the mang cua ho hoac cua ban can may chu TURN.');
+      }
+    }
+  };
+
+  if (initiator) {
+    (async () => {
+      try {
+        const offer = await pc.createOffer();
+        offer.sdp = tuneOpus(offer.sdp);
+        await pc.setLocalDescription(offer);
+        socket.emit('voice-signal', {
+          to: id,
+          data: { sdp: { type: pc.localDescription.type, sdp: pc.localDescription.sdp } }
+        });
+      } catch (err) {
+        console.warn('Loi tao loi moi voice', err);
+      }
+    })();
+  }
+  return peer;
+}
+
+// Nhan "thuong luong" tu nguoi khac (loi moi, tra loi, ung vien ket noi)
+async function onSignal({ from, data }) {
+  if (!inVoice || !data) return;
+  let peer = peers.get(from);
+  try {
+    if (data.sdp) {
+      if (!peer) peer = createPeer(from, false);
+      await peer.pc.setRemoteDescription(data.sdp);
+      for (const c of peer.queue) await peer.pc.addIceCandidate(c);
+      peer.queue = [];
+      if (data.sdp.type === 'offer') {
+        const answer = await peer.pc.createAnswer();
+        answer.sdp = tuneOpus(answer.sdp);
+        await peer.pc.setLocalDescription(answer);
+        socket.emit('voice-signal', {
+          to: from,
+          data: { sdp: { type: peer.pc.localDescription.type, sdp: peer.pc.localDescription.sdp } }
+        });
+      }
+    } else if (data.candidate) {
+      if (!peer) return;
+      if (peer.pc.remoteDescription) await peer.pc.addIceCandidate(data.candidate);
+      else peer.queue.push(data.candidate); // chua co mo ta tu xa thi xep hang cho
+    }
+  } catch (err) {
+    console.warn('Loi xu ly goi voice', err);
+  }
+}
+
+$('voiceBtn').onclick = () => { if (inVoice) leaveVoice(true); else joinVoice(); };
+$('muteBtn').onclick = toggleMute;
+// ==============================================================
+
+// 11. Neu tab nay da dang nhap truoc do (vd vua bam F5) thi tu vao lai
 // (doan nay PHAI nam o cuoi file)
 const savedName = sessionStorage.getItem('name');
 if (savedName) login(savedName);

@@ -29,6 +29,8 @@
       <header>
         <button id="menuBtn" type="button" class="icon">☰</button>
         <span id="roomTitle"># chung</span>
+        <button id="voiceBtn" type="button" class="vbtn">🎧 Voice</button>
+        <button id="muteBtn" type="button" class="vbtn hidden">🎙</button>
         <button id="usersBtn" type="button" class="icon">👥</button>
       </header>
       <div id="messages"></div>
@@ -45,6 +47,9 @@
     <!-- Lop toi phia sau ngan keo (chi dung tren dien thoai) -->
     <div id="backdrop" class="hidden"></div>
   </div>
+
+  <!-- Noi phat am thanh cua nguoi khac trong voice (khong hien ra) -->
+  <div id="audioBox" class="audiobox"></div>
 
   <!-- Hop tao phong moi -->
   <div id="roomModal" class="hidden">
