@@ -1,0 +1,40 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: system-ui, sans-serif; /* dung font co san, khong tai font ve */
+  background: #313338; color: #dbdee1; height: 100vh;
+}
+.hidden { display: none !important; }
+
+/* Dang nhap */
+#login { height: 100vh; display: flex; align-items: center; justify-content: center; }
+#loginForm { background: #2b2d31; padding: 24px; border-radius: 8px; display: flex; flex-direction: column; gap: 12px; width: 300px; }
+input { background: #1e1f22; border: none; color: #dbdee1; padding: 10px; border-radius: 6px; font-size: 15px; outline: none; }
+button { background: #5865f2; border: none; color: white; padding: 10px; border-radius: 6px; cursor: pointer; font-size: 15px; }
+button:hover { background: #4752c4; }
+
+/* Bo cuc 3 cot */
+#app { display: flex; height: 100vh; }
+aside { background: #2b2d31; width: 220px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+#users { background: #2b2d31; width: 200px; }
+.title { font-size: 12px; font-weight: 700; color: #949ba4; }
+ul { list-style: none; overflow-y: auto; flex: 1; }
+#roomList li { padding: 8px; border-radius: 4px; cursor: pointer; color: #949ba4; }
+#roomList li:hover { background: #35373c; color: #dbdee1; }
+#roomList li.active { background: #404249; color: white; }
+#userList li { padding: 6px 8px; }
+
+/* Khung chat */
+main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+header { padding: 14px 16px; font-weight: 700; border-bottom: 1px solid #1e1f22; }
+#messages { flex: 1; overflow-y: auto; padding: 16px; }
+.msg { display: flex; gap: 10px; margin-bottom: 14px; }
+.avatar { width: 38px; height: 38px; border-radius: 50%; background: #5865f2; color: white;
+  display: flex; align-items: center; justify-content: center; font-weight: 700; flex-shrink: 0; }
+.name { font-weight: 600; color: white; }
+.time { font-size: 11px; color: #949ba4; margin-left: 6px; }
+.text { word-break: break-word; margin-top: 2px; }
+#msgForm { padding: 0 16px 16px; }
+#msgInput { width: 100%; padding: 12px; }
+
+/* Dien thoai: an cot online cho do chat cho */
+@media (max-width: 700px) { #users { display: none; } aside { width: 140px; } }

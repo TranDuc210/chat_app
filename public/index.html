@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chat nhe</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Man hinh dang nhap -->
+  <div id="login">
+    <form id="loginForm">
+      <h2>Vao chat</h2>
+      <input id="nameInput" placeholder="Ten cua ban" maxlength="20" required>
+      <button>Tham gia</button>
+    </form>
+  </div>
+
+  <!-- Giao dien chinh -->
+  <div id="app" class="hidden">
+    <aside id="rooms">
+      <div class="title">PHONG</div>
+      <ul id="roomList"></ul>
+      <form id="newRoomForm">
+        <input id="newRoomInput" placeholder="+ Tao phong moi" maxlength="20">
+      </form>
+    </aside>
+
+    <main>
+      <header id="roomTitle"># chung</header>
+      <div id="messages"></div>
+      <form id="msgForm">
+        <input id="msgInput" placeholder="Nhap tin nhan..." maxlength="500" autocomplete="off">
+      </form>
+    </main>
+
+    <aside id="users">
+      <div class="title">ONLINE</div>
+      <ul id="userList"></ul>
+    </aside>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="client.js"></script>
+</body>
+</html>
