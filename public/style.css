@@ -100,3 +100,19 @@ header {
   text-align: center; font-size: 12px; color: #949ba4;
   font-style: italic; margin: 6px 0 14px;
 }
+/* ===== Icon thanh vien duoi ten phong ===== */
+#roomList li { white-space: normal; }
+.rname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.members { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; padding-left: 4px; }
+.chip { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.chip .dot {
+  width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; color: #fff;
+}
+.chip .cname {
+  font-size: 13px; color: #dbdee1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.more { font-size: 12px; color: #949ba4; padding-left: 30px; }
+#userList li { padding: 4px 8px; }

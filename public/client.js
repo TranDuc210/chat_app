@@ -1,13 +1,40 @@
 const $ = (id) => document.getElementById(id);
+const MAX_SHOWN = 8; // so nguoi toi da hien duoi moi ten phong
 let socket, myName = '';
 let currentRoom = 'chung', currentPass = ''; // phong va mat khau dang o
 let tryPass = '';                             // mat khau dang thu
+let lastRooms = [];                           // danh sach phong moi nhat tu server
+let currentUsers = [];                        // nguoi dang o trong phong hien tai
 
 // Ma nhan dang cua tab nay (giu nguyen khi bam F5, moi tab mot ma)
 let cid = sessionStorage.getItem('cid');
 if (!cid) {
   cid = Math.random().toString(36).slice(2) + Date.now().toString(36);
   sessionStorage.setItem('cid', cid);
+}
+
+// ===== Icon dai dien: vong tron mau + chu cai dau (tinh ngay tren may, khong ton bang thong) =====
+function colorOf(name) {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.codePointAt(0)) % 360;
+  return 'hsl(' + h + ', 55%, 45%)';
+}
+function initialOf(name) {
+  return ([...name][0] || '?').toUpperCase();
+}
+// Mot "the" gom icon tron + ten
+function makeChip(name) {
+  const chip = document.createElement('div');
+  chip.className = 'chip';
+  const dot = document.createElement('span');
+  dot.className = 'dot';
+  dot.style.background = colorOf(name);
+  dot.textContent = initialOf(name);
+  const label = document.createElement('span');
+  label.className = 'cname';
+  label.textContent = name; // textContent: an toan
+  chip.append(dot, label);
+  return chip;
 }
 
 // 1. Dang nhap
@@ -46,15 +73,8 @@ function setupSocket() {
   });
 
   socket.on('rooms', (list) => {
-    $('roomList').innerHTML = '';
-    list.forEach(([r, locked]) => {
-      const li = document.createElement('li');
-      li.textContent = (locked ? '🔒 ' : '# ') + r;
-      li.dataset.room = r;
-      if (r === currentRoom) li.classList.add('active');
-      li.onclick = () => joinRoom(r, locked);
-      $('roomList').appendChild(li);
-    });
+    lastRooms = list;
+    renderRooms();
   });
 
   socket.on('joined', ({ room, history, users }) => {
@@ -63,18 +83,18 @@ function setupSocket() {
     $('roomTitle').textContent = '# ' + room;
     $('messages').innerHTML = '';
     history.forEach(addMessage);
-    renderUsers(users);
-    [...$('roomList').children].forEach((li) =>
-      li.classList.toggle('active', li.dataset.room === room));
-    closePanels(); // tren dien thoai: dong ngan keo sau khi vao phong
+    renderUsers(users);   // cung cap nhat danh sach phong
+    closePanels();        // tren dien thoai: dong ngan keo sau khi vao phong
   });
 
   socket.on('msg', addMessage);
+  socket.on('users', renderUsers);
   socket.on('sys', addSystem);
   socket.on('warn', (text) => alert(text));
   socket.on('retry-login', () => {
     currentRoom = 'chung';
     currentPass = '';
+    currentUsers = [];
     sessionStorage.removeItem('name'); // quen ten de khong bi lap vo han
     socket.disconnect();
     $('app').classList.add('hidden');
@@ -92,14 +112,50 @@ function joinRoom(room, locked) {
   requestJoin(room, pass);
 }
 
-// 3. Hien thi tin nhan
+// 3. Ve danh sach phong, moi phong co nguoi ben duoi
+function renderRooms() {
+  const box = $('roomList');
+  box.innerHTML = '';
+  lastRooms.forEach(([r, locked, names, total]) => {
+    const li = document.createElement('li');
+    li.dataset.room = r;
+    if (r === currentRoom) li.classList.add('active');
+    li.onclick = () => joinRoom(r, locked);
+
+    const title = document.createElement('div');
+    title.className = 'rname';
+    title.textContent = (locked ? '🔒 ' : '# ') + r;
+    li.appendChild(title);
+
+    // Phong hien tai: dung danh sach moi nhat; phong khac: dung du lieu server gui
+    const isCur = r === currentRoom;
+    const list = isCur ? currentUsers : names;
+    const count = isCur ? currentUsers.length : total;
+    if (list.length) {
+      const members = document.createElement('div');
+      members.className = 'members';
+      list.slice(0, MAX_SHOWN).forEach((n) => members.appendChild(makeChip(n)));
+      if (count > MAX_SHOWN) {
+        const more = document.createElement('div');
+        more.className = 'more';
+        more.textContent = '+' + (count - MAX_SHOWN) + ' nguoi nua';
+        members.appendChild(more);
+      }
+      li.appendChild(members);
+    }
+    box.appendChild(li);
+  });
+}
+
+// 4. Hien thi tin nhan
 function addMessage(m) {
   const div = document.createElement('div');
   div.className = 'msg';
 
   const avatar = document.createElement('div');
   avatar.className = 'avatar';
-  avatar.textContent = m.u[0].toUpperCase();
+  avatar.style.background = colorOf(m.u);
+  avatar.textContent = initialOf(m.u);
 
   const body = document.createElement('div');
   const name = document.createElement('span');
@@ -117,14 +173,14 @@ function addMessage(m) {
   body.append(head, text);
   div.append(avatar, body);
 
-    pushToBox(div);
+  pushToBox(div);
 }
 
-// Thong bao he thong (vao / roi phong)
+// Thong bao he thong (chi hien neu server bat SHOW_SYS_MSG)
 function addSystem(text) {
   const div = document.createElement('div');
   div.className = 'sys';
-  div.textContent = text; // textContent: an toan
+  div.textContent = text;
   pushToBox(div);
 }
 
@@ -136,16 +192,19 @@ function pushToBox(el) {
   box.scrollTop = box.scrollHeight;
 }
 
+// Cot ONLINE ben phai + cap nhat nguoi trong phong hien tai
 function renderUsers(users) {
+  currentUsers = users;
   $('userList').innerHTML = '';
   users.forEach((u) => {
     const li = document.createElement('li');
-    li.textContent = u;
+    li.appendChild(makeChip(u));
     $('userList').appendChild(li);
   });
+  renderRooms();
 }
 
-// 4. Gui tin nhan
+// 5. Gui tin nhan
 $('msgForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const text = $('msgInput').value.trim();
@@ -154,7 +213,7 @@ $('msgForm').addEventListener('submit', (e) => {
   $('msgInput').value = '';
 });
 
-// 5. Tao phong moi (hoac vao phong da co)
+// 6. Tao phong moi (hoac vao phong da co)
 $('newRoomForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const name = $('newRoomInput').value.trim().toLowerCase().replace(/\s+/g, '-');
@@ -166,7 +225,7 @@ $('newRoomForm').addEventListener('submit', (e) => {
   requestJoin(name, pass);
 });
 
-// 6. Hop tao phong: mo / dong
+// 7. Hop tao phong: mo / dong
 function openRoomModal() {
   $('roomModal').classList.remove('hidden');
   $('newRoomInput').focus();
@@ -180,7 +239,7 @@ $('roomModal').addEventListener('click', (e) => {
   if (e.target === $('roomModal')) closeRoomModal(); // bam ra vung toi ben ngoai
 });
 
-// 7. Giao dien dien thoai: ngan keo phong / online
+// 8. Giao dien dien thoai: ngan keo phong / online
 function closePanels() {
   $('rooms').classList.remove('open');
   $('users').classList.remove('open');
@@ -198,7 +257,7 @@ $('menuBtn').onclick = () => togglePanel('rooms');
 $('usersBtn').onclick = () => togglePanel('users');
 $('backdrop').onclick = closePanels;
 
-// 8. Neu tab nay da dang nhap truoc do (vd vua bam F5) thi tu vao lai
+// 9. Neu tab nay da dang nhap truoc do (vd vua bam F5) thi tu vao lai
 // (doan nay PHAI nam o cuoi file)
 const savedName = sessionStorage.getItem('name');
 if (savedName) login(savedName);

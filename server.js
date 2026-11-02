@@ -17,6 +17,8 @@ const io = new Server(server, {
 app.use(express.static('public'));
 
 // ====== CAC GIOI HAN (muon doi thi sua o day) ======
+const SHOW_SYS_MSG = false;             // true = hien dong "X da vao/roi phong" trong khung chat
+const MAX_SHOWN = 8;                    // moi phong hien toi da 8 nguoi duoi ten phong
 const MAX_HISTORY = 50;                 // nho 50 tin gan nhat moi room
 const MAX_LEN = 500;                    // toi da 500 ky tu moi tin
 const LIMIT = 5, WINDOW_MS = 5000;      // chong spam: 5 tin / 5 giay
@@ -96,9 +98,25 @@ function getRoom(name, pass) {
   return rooms[name];
 }
 
-// Danh sach room gui cho client: [[ten, 1 neu co khoa], ...]
+// Danh sach phong gui cho client: [[ten, co khoa (0/1), [ten nguoi...], tong so nguoi], ...]
+// Phong co khoa thi KHONG gui ten nguoi ben trong (rieng tu)
 function roomList() {
-  return Object.keys(rooms).map((n) => [n, rooms[n].hash ? 1 : 0]);
+  return Object.keys(rooms).map((n) => {
+    const r = rooms[n];
+    if (r.hash) return [n, 1, [], 0];
+    const names = [...r.users.values()];
+    return [n, 0, names.slice(0, MAX_SHOWN), names.length];
+  });
+}
+
+// Gom nhieu thay doi lai, 0,3 giay moi gui 1 lan cho moi nguoi (do ton bang thong)
+let roomsTimer = null;
+function scheduleRooms() {
+  if (roomsTimer) return;
+  roomsTimer = setTimeout(() => {
+    roomsTimer = null;
+    io.emit('rooms', roomList());
+  }, 300);
 }
 
 function clean(text, max) {
@@ -121,7 +139,7 @@ setInterval(() => {
   }
   if (removed) {
     dirty = true;
-    io.emit('rooms', roomList());
+    scheduleRooms();
   }
 }, SWEEP_MS);
 
@@ -212,7 +230,7 @@ io.on('connection', (socket) => {
     // ---- Moi kiem tra deu qua: vao phong ----
     if (!existing) createTimes.push(Date.now()); // tinh vao han muc tao phong
 
-    if (currentRoom) leave(false); // roi phong cu (co thong bao)
+    if (currentRoom) leave(false); // roi phong cu
     username = newName;
 
     currentRoom = roomName;
@@ -227,8 +245,8 @@ io.on('connection', (socket) => {
       users: [...r.users.values()]
     });
     socket.to(roomName).emit('users', [...r.users.values()]);
-    if (!replaced) socket.to(roomName).emit('sys', username + ' da vao phong');
-    io.emit('rooms', roomList());
+    if (SHOW_SYS_MSG && !replaced) socket.to(roomName).emit('sys', username + ' da vao phong');
+    scheduleRooms(); // cap nhat danh sach phong + nguoi trong phong cho moi nguoi
   });
 
   socket.on('msg', (text) => {
@@ -262,7 +280,8 @@ io.on('connection', (socket) => {
     if (r.users.size === 0) r.emptySince = Date.now(); // bat dau dem gio phong trong
     socket.leave(currentRoom);
     io.to(currentRoom).emit('users', [...r.users.values()]);
-    if (!silent) io.to(currentRoom).emit('sys', username + ' da roi phong');
+    if (SHOW_SYS_MSG && !silent) io.to(currentRoom).emit('sys', username + ' da roi phong');
+    scheduleRooms();
   }
 
   socket.on('disconnect', () => {
