@@ -20,16 +20,16 @@
   <!-- Giao dien chinh -->
   <div id="app" class="hidden">
     <aside id="rooms">
-      <div class="title">PHONG</div>
+      <div class="title">Phòng</div>
       <ul id="roomList"></ul>
-      <button id="addRoomBtn" type="button">+ Tao phong</button>
+      <button id="addRoomBtn" type="button">+ Tạo phòng</button>
     </aside>
 
     <main>
       <header>
         <button id="menuBtn" type="button" class="icon">☰</button>
         <span id="roomTitle"># chung</span>
-        <button id="voiceBtn" type="button" class="vbtn off">🎧 Bat voice</button>
+        <button id="voiceBtn" type="button" class="vbtn off">🎧 Bật voice</button>
         <button id="settingsBtn" type="button" title="Cai dat voice">⚙</button>
         <button id="usersBtn" type="button" class="icon">👥</button>
       </header>
@@ -57,11 +57,11 @@
   <!-- Hop tao phong moi -->
   <div id="roomModal" class="hidden">
     <form id="newRoomForm">
-      <h3>Tao phong moi</h3>
+      <h3>Tạo phòng mới</h3>
       <input id="newRoomInput" placeholder="Ten phong" maxlength="20" autocomplete="off">
-      <input id="newRoomPass" type="password" placeholder="Mat khau (co the bo trong)" maxlength="50" autocomplete="new-password">
+      <input id="newRoomPass" type="password" placeholder="Mật khẩu (có thể bỏ trống)" maxlength="50" autocomplete="new-password">
       <div class="row">
-        <button type="button" id="cancelRoomBtn" class="gray">Huy</button>
+        <button type="button" id="cancelRoomBtn" class="gray">Hủy</button>
         <button>Tao</button>
       </div>
     </form>
@@ -70,41 +70,41 @@
   <!-- Hop cai dat voice -->
   <div id="voiceModal" class="hidden">
     <div id="voicePanel">
-      <h3>Cai dat voice</h3>
+      <h3>Cài đặt voice</h3>
 
-      <label class="opt"><input type="checkbox" id="optAuto"> Tu dong vao voice khi vao phong</label>
+      <label class="opt"><input type="checkbox" id="optAuto"> Tự động vào voice khi vào phòng</label>
 
       <div class="opt-title">CHE DO NOI</div>
-      <label class="opt"><input type="radio" name="vmode" value="auto"> Tu dong noi (mic luon mo)</label>
-      <label class="opt"><input type="radio" name="vmode" value="ptt"> Nhan de noi (chi noi khi giu phim)</label>
+      <label class="opt"><input type="radio" name="vmode" value="auto"> Tự động nói (Mic luôn mở)</label>
+      <label class="opt"><input type="radio" name="vmode" value="ptt"> Nhấn để nói (Chỉ nói khi giữ phím)</label>
 
       <div id="pttKeyRow" class="opt hidden">
-        Phim nhan de noi:
+       Phím nhấn để nói:
         <button type="button" id="pttKeyBtn" class="gray">`</button>
       </div>
-      <div class="hint">Tren dien thoai: giu nut 🎤 tren thanh tieu de de noi. Che do nhan de noi cung la cach tot nhat de tranh tieng vang.</div>
+      <div class="hint">Trên điện thoại: giữu nut 🎤 trên thanh tiêu đề để nói. Chế độ nhấn để nói cũng là cách tốt nhất để tránh tiếng vang.</div>
 
-      <div class="opt-title">THIET BI AM THANH</div>
-      <label class="field">Dau vao (micro)
+      <div class="opt-title">THIẾT BỊ ÂM THANH</div>
+      <label class="field">Đầu vào (micro)
         <select id="micSelect"></select>
       </label>
-      <label class="field">Dau ra (loa / tai nghe)
+      <label class="field">Đầu ra(loa / tai nghe)
         <select id="spkSelect"></select>
       </label>
       <div id="deviceHint" class="hint"></div>
       <button type="button" id="refreshDevBtn" class="gray">Lam moi danh sach thiet bi</button>
-      <div class="hint">De "Mac dinh cua may" thi app tu dung thiet bi ma may dang chon (cam tai nghe vao la dung tai nghe). Dung loa ngoai ket hop micro de bi vang.</div>
+      <div class="hint">Để "Mặc định của máy" thì app tự dùng thiết bị mà máy đang chọn (cấm tai nghe vào là dùng tai nghe). Dùng loa ngoài với micro dễ bị vang.</div>
 
-      <div class="opt-title">NGUONG LOC TIENG ON</div>
+      <div class="opt-title">Ngưỡng lọc tiếng ồn</div>
       <div id="meterBox">
         <div id="meter"><div id="meterBar"></div><div id="meterThr" class="hidden"></div></div>
         <div id="meterText" class="hint"></div>
       </div>
       <label class="field">
-        <span>Nguong mic: <b id="gateLabel">Tat</b></span>
+        <span>Ngưỡng mic: <b id="gateLabel">Tắt</b></span>
         <input type="range" id="gateSlider" min="-80" max="-10" step="1" value="-80">
       </label>
-      <div class="hint">Am thanh nho hon nguong se KHONG duoc gui di. Keo het sang trai = Tat. Muc dB la so am: cang gan 0 cang khat khe. Hay im lang vai giay de xem thanh do, roi dat nguong cao hon muc tieng on mot chut nhung thap hon giong noi cua ban.</div>
+      <div class="hint">Âm thanh nhỏ hơn ngưỡng sẽ không được ghi. Kéo hết sang trái = Tắt. Mức db là số âm: càng gần 0 càng khắt khe. Hãy im lặng vài giây đê xem thanh đo, rồi tắt ngưỡng cao hơn mức tiếng ồn một chút nhưng thất hơn ngưỡng nói của bạn.</div>
 
       <button type="button" id="leaveVoiceBtn" class="gray">Roi voice</button>
       <div class="hint">Hay dung tai nghe de khong bi vang tieng.</div>

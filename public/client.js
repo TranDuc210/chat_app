@@ -982,15 +982,15 @@ function fillSelect(sel, list, current, defLabel, prefix) {
 
 
 function renderDevices() {
-  fillSelect($('micSelect'), devices.mics, micId, 'Mac dinh cua may', 'Micro');
-  fillSelect($('spkSelect'), devices.spks, spkId, 'Mac dinh cua may', 'Loa');
+  fillSelect($('micSelect'), devices.mics, micId, 'Mặc định của máy', 'Micro');
+  fillSelect($('spkSelect'), devices.spks, spkId, 'Mặc định của máy', 'Loa');
   $('spkSelect').disabled = !HAS_SINK;
   syncDeviceDropdown($('spkSelect'));
   const notes = [];
   if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
-    notes.push('Trinh duyet khong ho tro liet ke thiet bi am thanh.');
+    notes.push('Trình duyệt không hỗ trợ liên kết thiết bị âm thanh.');
   } else if (devices.mics.length === 0 || devices.mics.every((d) => !d.label)) {
-    notes.push('Chua doc duoc ten thiet bi: hay cho phep micro roi bam "Lam moi danh sach thiet bi".');
+    notes.push('chưa đọc được tên thiết bị: hãy cho phép micro rồi bấm "Làm mới danh sách thiết bị".');
   }
   if (!HAS_SINK) {
     notes.push('Trinh duyet nay khong cho chon loa/tai nghe dau ra (Safari, iPhone...). Hay doi trong cai dat he thong.');
@@ -1162,7 +1162,7 @@ function renderSettings() {
   $('optAuto').checked = autoVoice;
   document.querySelectorAll('input[name="vmode"]').forEach((r) => { r.checked = r.value === voiceMode; });
   $('pttKeyRow').classList.toggle('hidden', voiceMode !== 'ptt');
-  $('pttKeyBtn').textContent = capturingKey ? 'Nhan mot phim...' : keyLabel(pttKey);
+  $('pttKeyBtn').textContent = capturingKey ? 'Nhấn một phím...' : keyLabel(pttKey);
   $('leaveVoiceBtn').classList.toggle('hidden', !inVoice);
   renderDevices();
   renderGateUI();
@@ -1196,7 +1196,7 @@ $('pttKeyBtn').onclick = () => {
 $('leaveVoiceBtn').onclick = () => {
   leaveVoice(true);
   renderSettings();
-  toast('Ban da roi voice cua phong nay. Bam nut "Bat voice" hoac doi phong de vao lai.');
+  toast('Bạn đã rời voice của phòng này. Bấm nút "Bật voice" hoặc đổi phòng để vào lại.');
 };
 
 // ---- Chon thiet bi ----
