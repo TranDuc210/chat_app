@@ -2,7 +2,12 @@ const $ = (id) => document.getElementById(id);
 const MAX_SHOWN = 8; // so nguoi toi da hien duoi moi ten phong
 const GATE_OFF = -80; // thanh nguong o muc nay = tat bo loc tieng on
 let socket, myName = '';
-let currentRoom = 'chung', currentPass = ''; // phong va mat khau dang o
+
+let currentRoom = 'chung'; // Phòng đang xem tin nhắn
+let currentPass = '';      // Mật khẩu của phòng đang tham gia
+
+let memberRoom = 'chung';  // Phòng đang tham gia thực tế
+let memberPass = '';       // Mật khẩu để kết nối lại phòng đang tham gia // phong va mat khau dang o
 let tryPass = '';                             // mat khau dang thu
 let lastRooms = [];                           // danh sach phong moi nhat tu server
 let currentUsers = [];                        // nguoi dang o trong phong hien tai
@@ -95,8 +100,12 @@ function login(user) {
 
   // Xóa trạng thái phòng của phiên trước
   currentRoom = 'chung';
-  currentPass = '';
-  tryPass = '';
+currentPass = '';
+
+memberRoom = 'chung';
+memberPass = '';
+
+tryPass = '';
 
   $('login').classList.add('hidden');
   $('app').classList.remove('hidden');
@@ -214,9 +223,13 @@ $('logoutBtn').addEventListener('click', async () => {
 
     myName = '';
 
-currentRoom = 'chung';
-currentPass = '';
-tryPass = '';
+      currentRoom = 'chung';
+      currentPass = '';
+
+      memberRoom = 'chung';
+      memberPass = '';
+
+      tryPass = '';
 
     $('app').classList.add('hidden');
     $('login').classList.remove('hidden');
@@ -239,11 +252,16 @@ function requestJoin(room, pass) {
   tryPass = pass || '';
   socket.emit('join', { room, pass, cid });
 }
-
+function requestViewRoom(room, pass) {
+  socket.emit('view-room', {
+    room,
+    pass: pass || ''
+  });
+}
 // 2. Lang nghe su kien tu server
 function setupSocket() {
   // Chay MOI LAN ket noi duoc (ke ca ket noi lai)
-  socket.on('connect', () => requestJoin(currentRoom, currentPass));
+  socket.on('connect', () => requestJoin(memberRoom, memberPass));
 
   socket.on('disconnect', (reason) => {
     leaveVoice(false); // mat ket noi thi tu roi voice (noi lai se tu vao lai)
@@ -262,7 +280,10 @@ function setupSocket() {
     // Moi lan vao/doi phong, server deu xoa ban khoi voice -> client cung phai roi voice
     if (inVoice) leaveVoice(false);
     currentRoom = room;
-    currentPass = tryPass; // nho mat khau de tu vao lai khi mat ket noi
+currentPass = tryPass;
+
+memberRoom = room;
+memberPass = tryPass; // nho mat khau de tu vao lai khi mat ket noi
     voiceNames = voice || [];
     voiceMembers = members || [];
     $('roomTitle').textContent = '# ' + room;
@@ -270,9 +291,22 @@ function setupSocket() {
     history.forEach(addMessage);
     renderUsers(users);   // cung cap nhat danh sach phong
     closePanels();        // tren dien thoai: dong ngan keo sau khi vao phong
-    if (autoVoice) joinVoice(); // tu dong vao voice cua phong moi
+    if (autoVoice && room !== 'chung') joinVoice(); // tu dong vao voice cua phong moi
   });
+socket.on('viewed', ({ room, history, users }) => {
+  currentRoom = room;
 
+  $('roomTitle').textContent = '# ' + room;
+  $('messages').innerHTML = '';
+
+  history.forEach(addMessage);
+
+  voiceNames = [];
+  renderUsers(users || []);
+
+  closePanels();
+  renderRooms();
+});
   socket.on('msg', addMessage);
   socket.on('users', renderUsers);
   socket.on('sys', addSystem);
@@ -312,12 +346,25 @@ function setupSocket() {
 }
 
 function joinRoom(room, locked) {
-  if (room === currentRoom) { closePanels(); return; }
+  if (room === currentRoom) {
+    closePanels();
+    return;
+  }
+
   let pass = '';
+
   if (locked) {
     pass = prompt('Nhap mat khau cua phong "' + room + '":');
-    if (pass === null) return; // bam Huy
+    if (pass === null) return;
   }
+
+  // Chung chỉ chuyển sang xem tin nhắn
+  if (room === 'chung') {
+    requestViewRoom(room, pass);
+    return;
+  }
+
+  // Các phòng khác vẫn tham gia như bình thường
   requestJoin(room, pass);
 }
 
@@ -543,7 +590,13 @@ async function joinVoice() {
   joining = true;
   voiceFull = false;
   updateVoiceUI();
-  const myRoom = currentRoom;
+  const myRoom = memberRoom;
+if (myRoom === 'chung') {
+  joining = false;
+  updateVoiceUI();
+  toast('Phòng chung chỉ dùng để nhắn tin, không có voice.');
+  return;
+}
 
   let stream = null;
   let why = '';
@@ -556,7 +609,7 @@ async function joinVoice() {
   }
 
   // Trong luc cho micro ma da doi phong hoac mat ket noi thi huy
-  if (currentRoom !== myRoom || !socket.connected) {
+ if (memberRoom !== myRoom || !socket.connected) {
     if (stream) stream.getTracks().forEach((t) => t.stop());
     joining = false;
     updateVoiceUI();
@@ -1323,10 +1376,11 @@ function getVoiceMemberName(id) {
 }
 
 function peerVolumeKey(name) {
-  return 'peerVolume:' + currentRoom + ':' + name;
+  return 'peerVolume:' + memberRoom + ':' + name;
 }
+
 function peerMuteKey(name) {
-  return 'peerMuted:' + currentRoom + ':' + name;
+  return 'peerMuted:' + memberRoom + ':' + name;
 }
 function getPeerVolume(name) {
   const value = Number(store.get(peerVolumeKey(name), '100'));

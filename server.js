@@ -432,8 +432,11 @@ setInterval(async () => {
 }, SWEEP_MS);
 
 io.on('connection', (socket) => {
-   const userId = socket.request.session.userId;
-  let currentRoom = null;
+  const userId = socket.request.session.userId;
+
+  let currentRoom = null; // Phòng đang tham gia, dùng cho danh sách thành viên
+  let viewedRoom = null;  // Phòng đang xem tin nhắn
+  let voiceRoom = null;   // Phòng đang tham gia voice
   let username = '';
   let recent = [];       // chong spam tin nhan
   let failCount = 0;     // so lan sai mat khau
@@ -540,14 +543,30 @@ io.on('connection', (socket) => {
     // ---- Moi kiem tra deu qua: vao phong ----
     if (!existing) createTimes.push(Date.now()); // tinh vao han muc tao phong
 
-    if (currentRoom) leave(false); // roi phong cu (dong thoi roi voice cua phong cu)
-    username = newName;
+   if (currentRoom) leave(false);
 
-    currentRoom = roomName;
-    const r = getRoom(roomName, passText); // neu chua co thi tao, kem mat khau (neu co)
-    r.users.set(socket.id, newName);
-    r.emptySince = null;
-    socket.join(roomName);
+// Rời kênh tin nhắn cũ nếu có
+if (viewedRoom) {
+  socket.leave('chat:' + viewedRoom);
+
+  // Nếu phòng đang xem khác phòng đang tham gia,
+  // rời luôn kênh theo dõi danh sách thành viên cũ
+  if (viewedRoom !== currentRoom) {
+    socket.leave('members:' + viewedRoom);
+  }
+}
+
+username = newName;
+currentRoom = roomName;
+viewedRoom = roomName;
+
+const r = getRoom(roomName, passText);
+r.users.set(socket.id, newName);
+r.emptySince = null;
+
+// Kênh tin nhắn riêng
+socket.join('chat:' + roomName);
+socket.join('members:' + roomName);
 
     socket.emit('joined', {
       room: roomName,
@@ -556,91 +575,205 @@ io.on('connection', (socket) => {
       voice: voiceNames(r),
       voiceMembers: voiceMembers(r)
     });
-    socket.to(roomName).emit('users', [...r.users.values()]);
-    if (SHOW_SYS_MSG && !replaced) socket.to(roomName).emit('sys', newName + ' da vao phong');
+    socket.to('members:' + roomName).emit('users', {
+  room: roomName,
+  users: [...r.users.values()]
+});
+
+    if (SHOW_SYS_MSG && !replaced) {
+  socket.to('chat:' + roomName).emit('sys', newName + ' da vao phong');
+}
     scheduleRooms(); // cap nhat danh sach phong + nguoi trong phong cho moi nguoi
   });
+// Chỉ chuyển phòng xem tin nhắn, không đổi phòng thành viên hoặc voice
+socket.on('view-room', ({ room, pass }) => {
+  const roomName = clean(room, 20).toLowerCase() || 'chung';
+  const passText = clean(pass, 50);
 
-  socket.on('msg', (text) => {
-    if (!currentRoom) return;
+  if (!ROOM_NAME_RE.test(roomName)) return;
 
-    const now = Date.now();
-    recent = recent.filter((t) => now - t < WINDOW_MS);
-    if (recent.length >= LIMIT) {
-      socket.emit('warn', 'Ban gui qua nhanh, vui long cho chut.');
-      return;
-    }
-    recent.push(now);
+  const r = rooms[roomName];
 
-    const content = clean(text, MAX_LEN);
-    if (!content) return;
-
-    const m = { u: username, t: content, ts: Date.now() };
-    const r = getRoom(currentRoom);
-    r.history.push(m);
-    if (r.history.length > MAX_HISTORY) r.history.shift();
-    dirty = true;
-
-    io.to(currentRoom).emit('msg', m);
-  });
-
-  // ================= VOICE =================
-  // Vao voice cua phong hien tai
-  socket.on('voice-join', () => {
-    if (!currentRoom) return;
-    const r = rooms[currentRoom];
-    if (!r || r.voice.has(socket.id)) return;
-     if (r.voice.size >= MAX_VOICE) {
-      socket.emit('voice-denied', MAX_VOICE);
-      return;
-    }
-    const peers = [...r.voice];        // nhung nguoi da o trong voice
-    r.voice.add(socket.id);
-    socket.emit('voice-peers', peers); // nguoi moi se chu dong goi cho tung nguoi
-    io.to(currentRoom).emit('voice-users', voiceNames(r));
-    io.to(currentRoom).emit('voice-members', voiceMembers(r));
-  });
-
-  socket.on('voice-leave', () => leaveVoice());
-
-  // Chuyen tiep goi "thuong luong" giua 2 nguoi trong CUNG voice cua CUNG phong
-  socket.on('voice-signal', (payload) => {
-    const { to, data } = payload || {};
-    if (!currentRoom || typeof to !== 'string' || to === socket.id) return;
-    const r = rooms[currentRoom];
-    if (!r || !r.voice.has(socket.id) || !r.voice.has(to)) return;
-
-    const now = Date.now();
-    signalTimes = signalTimes.filter((t) => now - t < SIGNAL_WINDOW_MS);
-    if (signalTimes.length >= SIGNAL_LIMIT) return;
-    signalTimes.push(now);
-
-    if (!data || typeof data !== 'object') return;
-    if (JSON.stringify(data).length > 8000) return;
-    io.to(to).emit('voice-signal', { from: socket.id, data });
-  });
-
-  function leaveVoice() {
-    const r = rooms[currentRoom];
-    if (!r || !r.voice.delete(socket.id)) return;
-    io.to(currentRoom).emit('voice-peer-left', socket.id);
-    io.to(currentRoom).emit('voice-users', voiceNames(r));
-    io.to(currentRoom).emit('voice-members', voiceMembers(r));
+  if (!r) {
+    socket.emit('warn', 'Phòng không tồn tại.');
+    return;
   }
+
+  if (r.hash && !checkPass(r, passText)) {
+    socket.emit('warn', 'Sai mật khẩu của phòng "' + roomName + '".');
+    return;
+  }
+
+  if (!r.hash && passText) {
+    socket.emit('warn', 'Phòng này không có mật khẩu.');
+    return;
+  }
+
+ if (viewedRoom) {
+  socket.leave('chat:' + viewedRoom);
+
+  // Không rời kênh thành viên nếu đó vẫn là phòng đang tham gia
+  if (viewedRoom !== currentRoom) {
+    socket.leave('members:' + viewedRoom);
+  }
+}
+
+viewedRoom = roomName;
+
+socket.join('chat:' + roomName);
+socket.join('members:' + roomName);
+
+socket.emit('viewed', {
+  room: roomName,
+  history: r.history,
+  users: [...r.users.values()]
+});
+});
+  socket.on('msg', (text) => {
+  if (!viewedRoom || !currentRoom) return;
+
+  const now = Date.now();
+  recent = recent.filter((t) => now - t < WINDOW_MS);
+
+  if (recent.length >= LIMIT) {
+    socket.emit('warn', 'Ban gui qua nhanh, vui long cho chut.');
+    return;
+  }
+
+  recent.push(now);
+
+  const content = clean(text, MAX_LEN);
+  if (!content) return;
+
+  const m = {
+    u: username,
+    t: content,
+    ts: Date.now()
+  };
+
+  const r = getRoom(viewedRoom);
+  r.history.push(m);
+
+  if (r.history.length > MAX_HISTORY) {
+    r.history.shift();
+  }
+
+  dirty = true;
+
+  io.to('chat:' + viewedRoom).emit('msg', m);
+});
+
+ // ================= VOICE =================
+
+// Vào voice của phòng đang tham gia, không phải phòng đang xem
+socket.on('voice-join', () => {
+  if (!currentRoom || currentRoom === 'chung') {
+    socket.emit('voice-denied', MAX_VOICE);
+    return;
+  }
+
+  const r = rooms[currentRoom];
+  if (!r) return;
+
+  if (voiceRoom === currentRoom && r.voice.has(socket.id)) return;
+
+  if (voiceRoom) leaveVoice();
+
+  if (r.voice.size >= MAX_VOICE) {
+    socket.emit('voice-denied', MAX_VOICE);
+    return;
+  }
+
+  voiceRoom = currentRoom;
+
+  const peers = [...r.voice];
+  r.voice.add(socket.id);
+
+  socket.join('voice:' + voiceRoom);
+
+  socket.emit('voice-peers', peers);
+
+  io.to('voice:' + voiceRoom).emit('voice-users', voiceNames(r));
+  io.to('voice:' + voiceRoom).emit('voice-members', voiceMembers(r));
+});
+
+socket.on('voice-leave', () => leaveVoice());
+
+socket.on('voice-signal', (payload) => {
+  const { to, data } = payload || {};
+
+  if (!voiceRoom || typeof to !== 'string' || to === socket.id) return;
+
+  const r = rooms[voiceRoom];
+  if (!r || !r.voice.has(socket.id) || !r.voice.has(to)) return;
+
+  const now = Date.now();
+  signalTimes = signalTimes.filter((t) => now - t < SIGNAL_WINDOW_MS);
+
+  if (signalTimes.length >= SIGNAL_LIMIT) return;
+  signalTimes.push(now);
+
+  if (!data || typeof data !== 'object') return;
+  if (JSON.stringify(data).length > 8000) return;
+
+  io.to(to).emit('voice-signal', {
+    from: socket.id,
+    data
+  });
+});
+
+function leaveVoice() {
+  if (!voiceRoom) return;
+
+  const oldVoiceRoom = voiceRoom;
+  const r = rooms[oldVoiceRoom];
+
+  voiceRoom = null;
+
+  if (!r || !r.voice.delete(socket.id)) {
+    socket.leave('voice:' + oldVoiceRoom);
+    return;
+  }
+
+  socket.leave('voice:' + oldVoiceRoom);
+
+  io.to('voice:' + oldVoiceRoom).emit('voice-peer-left', socket.id);
+  io.to('voice:' + oldVoiceRoom).emit('voice-users', voiceNames(r));
+  io.to('voice:' + oldVoiceRoom).emit('voice-members', voiceMembers(r));
+}
+
+// =========================================
   // =========================================
 
   // silent = true thi khong gui thong bao "da roi phong"
   function leave(silent) {
-    const r = rooms[currentRoom];
-    if (!r) return;
-    leaveVoice(); // roi voice truoc khi roi phong
-    r.users.delete(socket.id);
-    if (r.users.size === 0) r.emptySince = Date.now(); // bat dau dem gio phong trong
-    socket.leave(currentRoom);
-    io.to(currentRoom).emit('users', [...r.users.values()]);
-    if (SHOW_SYS_MSG && !silent) io.to(currentRoom).emit('sys', username + ' da roi phong');
-    scheduleRooms();
+  const r = rooms[currentRoom];
+  if (!r) return;
+
+  // Rời voice độc lập
+  if (voiceRoom === currentRoom) {
+    leaveVoice();
   }
+
+  r.users.delete(socket.id);
+
+  if (r.users.size === 0) {
+    r.emptySince = Date.now();
+  }
+
+  socket.leave('members:' + currentRoom);
+
+io.to('members:' + currentRoom).emit('users', {
+  room: currentRoom,
+  users: [...r.users.values()]
+});
+
+if (SHOW_SYS_MSG && !silent) {
+  io.to('chat:' + currentRoom).emit('sys', username + ' da roi phong');
+}
+
+  scheduleRooms();
+}
 
   socket.on('disconnect', () => {
     cidOf.delete(socket.id);
