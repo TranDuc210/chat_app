@@ -43,6 +43,7 @@ io.engine.use(sessionMiddleware);
 // ===== API TAI KHOAN =====
 
 // Dang ky
+// Dang ky
 app.post('/api/register', async (req, res) => {
   try {
     const username = String(req.body.username || '').trim();
@@ -75,23 +76,27 @@ app.post('/api/register', async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 12);
 
-    const result = db.prepare(`
-      INSERT INTO users (username, email, password_hash)
-      VALUES (?, ?, ?)
-    `).run(username, email, passwordHash);
+    const result = await db.query(
+      `INSERT INTO users (username, email, password_hash)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [username, email, passwordHash]
+    );
 
-    req.session.userId = result.lastInsertRowid;
+    const userId = result.rows[0].id;
+
+    req.session.userId = userId;
 
     res.json({
       message: 'Đăng ký thành công!',
       user: {
-        id: result.lastInsertRowid,
+        id: userId,
         username,
         email
       }
     });
   } catch (err) {
-    if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+    if (err.code === '23505') {
       return res.status(409).json({
         error: 'Tên tài khoản hoặc email đã được sử dụng.'
       });
@@ -108,10 +113,12 @@ app.post('/api/login', async (req, res) => {
     const login = String(req.body.login || '').trim();
     const password = String(req.body.password || '');
 
-    const user = db.prepare(`
-      SELECT * FROM users
-      WHERE username = ? OR email = ?
-    `).get(login, login.toLowerCase());
+    const result = await db.query(`
+  SELECT * FROM users
+  WHERE username = $1 OR email = $2
+`, [login, login.toLowerCase()]);
+
+const user = result.rows[0];
 
     if (!user || !(await bcrypt.compare(password, user.password_hash))) {
       return res.status(401).json({
@@ -136,16 +143,18 @@ app.post('/api/login', async (req, res) => {
 });
 
 // Kiem tra tai khoan dang dang nhap
-app.get('/api/me', (req, res) => {
+app.get('/api/me', async (req, res) => {
   if (!req.session.userId) {
     return res.status(401).json({ error: 'Chưa đăng nhập.' });
   }
 
-  const user = db.prepare(`
-    SELECT id, username, email
-    FROM users
-    WHERE id = ?
-  `).get(req.session.userId);
+  const result = await db.query(`
+  SELECT id, username, email
+  FROM users
+  WHERE id = $1
+`, [req.session.userId]);
+
+const user = result.rows[0];
 
   if (!user) {
     return res.status(401).json({ error: 'Tài khoản không tồn tại.' });

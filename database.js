@@ -1,23 +1,37 @@
+const { Pool } = require('pg');
 
-const Database = require('better-sqlite3');
+if (!process.env.DATABASE_URL) {
+  throw new Error('DATABASE_URL chưa được cấu hình!');
+}
 
-// Tạo hoặc mở database
-const db = new Database('chat.db');
+const db = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false
+  }
+});
 
-// Bật foreign keys
-db.pragma('foreign_keys = ON');
-
-// Tạo bảng tài khoản
-db.exec(`
+// Tạo bảng tài khoản trên Neon nếu chưa có
+db.query(`
   CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id BIGSERIAL PRIMARY KEY,
     username TEXT NOT NULL UNIQUE,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
-`);
-
-console.log('Database đã sẵn sàng!');
-
+`)
+  .then(() => {
+    console.log('Bảng users trên Neon đã sẵn sàng!');
+  })
+  .catch((err) => {
+    console.error('Không thể tạo bảng users:', err);
+  });
+db.query('SELECT NOW()')
+  .then((result) => {
+    console.log('Kết nối Neon thành công:', result.rows[0]);
+  })
+  .catch((err) => {
+    console.error('Kết nối Neon thất bại:', err.message);
+  });
 module.exports = db;
