@@ -606,7 +606,29 @@ io.on('connection', (socket) => {
     if (currentRoom) leave(!!socket.data.silent);
   });
 });
+async function loadRoomsFromDB() {
+  try {
+    const result = await db.query(
+      'SELECT room_name, history, salt, password_hash FROM chat_rooms'
+    );
 
+    for (const row of result.rows) {
+      rooms[row.room_name] = {
+        history: row.history || [],
+        salt: row.salt,
+        hash: row.password_hash,
+        users: new Map(),
+        voice: new Set(),
+        emptySince: Date.now()
+      };
+    }
+
+    console.log(`Đã tải ${result.rows.length} phòng chat từ Neon.`);
+  } catch (err) {
+    console.error('Lỗi tải phòng chat từ Neon:', err);
+    throw err;
+  }
+}
 const PORT = process.env.PORT || 3000;
 
 (async () => {
