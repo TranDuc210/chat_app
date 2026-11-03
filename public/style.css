@@ -1212,3 +1212,206 @@ header {
 #voicePanel .device-select-menu:not([hidden]) {
     animation: deviceMenuSmooth 180ms ease-out;
 }
+
+
+/* =====================================================
+   INDIVIDUAL VOICE VOLUME MODAL
+===================================================== */
+#peerVolumeModal {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(7, 10, 16, .72);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+}
+#peerVolumeModal.hidden { display: none !important; }
+#peerVolumePanel {
+  width: min(100%, 380px);
+  padding: 22px;
+  color: #e8edf7;
+  background: linear-gradient(145deg, #282d37, #20242c);
+  border: 1px solid #414a5a;
+  border-radius: 18px;
+  box-shadow: 0 24px 70px rgba(0,0,0,.48);
+  animation: peerVolumeIn 180ms cubic-bezier(.2,.8,.2,1);
+}
+@keyframes peerVolumeIn {
+  from { opacity: 0; transform: translateY(8px) scale(.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.peer-volume-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+#peerVolumeTitle {
+  margin: 0;
+  color: #f4f7ff;
+  font-size: 19px;
+  font-weight: 700;
+}
+.peer-volume-subtitle {
+  margin-top: 5px;
+  color: #9aa6b8;
+  font-size: 12px;
+}
+#peerVolumePanel .peer-volume-close {
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border: 1px solid #414a59;
+  border-radius: 9px;
+  color: #aab5c6;
+  background: #303641;
+  font-size: 23px;
+  line-height: 1;
+}
+#peerVolumePanel .peer-volume-close:hover {
+  color: #fff;
+  background: #3b4554;
+}
+.peer-volume-user {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  margin: 22px 0;
+  padding: 14px;
+  border: 1px solid #3d4655;
+  border-radius: 13px;
+  background: rgba(255,255,255,.025);
+}
+.peer-volume-avatar {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
+  border-radius: 14px;
+  color: #c5d9ff;
+  background: linear-gradient(145deg, #405a82, #293b57);
+  font-size: 22px;
+}
+.peer-volume-user-info {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+}
+.peer-volume-user-info strong {
+  overflow: hidden;
+  color: #f2f5fc;
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.peer-volume-user-info span {
+  color: #98a4b6;
+  font-size: 12px;
+}
+.peer-volume-control {
+  padding: 2px 1px 17px;
+}
+.peer-volume-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 13px;
+  font-size: 14px;
+  font-weight: 600;
+}
+#peerVolumeValue {
+  padding: 5px 9px;
+  border-radius: 8px;
+  color: #bcd4ff;
+  background: #34445e;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.peer-volume-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+.peer-volume-icon {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  color: #9eabc0;
+  font-size: 17px;
+}
+#peerVolumeSlider {
+  flex: 1;
+  width: 100%;
+  accent-color: #86adff;
+  cursor: pointer;
+}
+.peer-volume-control p {
+  margin: 10px 0 0;
+  color: #8e9aac;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.peer-volume-mute-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 0;
+  border-top: 1px solid #3b414d;
+  border-bottom: 1px solid #3b414d;
+  cursor: pointer;
+}
+.peer-volume-mute-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.peer-volume-mute-copy strong {
+  color: #e6ebf4;
+  font-size: 13px;
+}
+.peer-volume-mute-copy small {
+  color: #8f9bad;
+  font-size: 11px;
+}
+#peerMuteCheckbox {
+  width: 18px;
+  height: 18px;
+  accent-color: #7da9ff;
+  cursor: pointer;
+}
+#peerVolumePanel .peer-volume-done {
+  width: 100%;
+  margin-top: 17px;
+  border: 0;
+  color: #fff;
+  background: linear-gradient(135deg, #668cff, #536be5);
+  box-shadow: 0 5px 16px rgba(83,107,229,.2);
+}
+#peerVolumePanel .peer-volume-done:hover {
+  filter: brightness(1.08);
+}
+#users li.voice-user-volume-target {
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 150ms ease, transform 150ms ease;
+}
+#users li.voice-user-volume-target:hover {
+  background: rgba(110, 150, 230, .12);
+  transform: translateX(2px);
+}
+#users li.voice-user-volume-target:focus-visible {
+  outline: 2px solid #7da9ff;
+  outline-offset: 2px;
+}
+@media (max-width: 600px) {
+  #peerVolumeModal { padding: 14px; }
+  #peerVolumePanel { padding: 19px; }
+}
