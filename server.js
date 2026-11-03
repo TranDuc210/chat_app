@@ -478,7 +478,7 @@ const DEFAULT_ROOMS = [
   'tam-su'
 ];
 const activeCidByUser = new Map(); // userId -> cid dang hoat dong
-
+const cidOf = new Map(); // socket.id -> cid
 // ---- Mat khau: chi luu ban bam (hash), khong luu chu that ----
 function hashPass(pass, salt) {
   return crypto.scryptSync(pass, salt, 32).toString('hex');
