@@ -3,11 +3,11 @@ const MAX_SHOWN = 8; // so nguoi toi da hien duoi moi ten phong
 const GATE_OFF = -80; // thanh nguong o muc nay = tat bo loc tieng on
 let socket, myName = '';
 
-let currentRoom = 'chung'; // Phòng đang xem tin nhắn
-let currentPass = '';      // Mật khẩu của phòng đang tham gia
+let currentRoom = null;
+let currentPass = '';
 
-let memberRoom = 'chung';  // Phòng đang tham gia thực tế
-let memberPass = '';       // Mật khẩu để kết nối lại phòng đang tham gia // phong va mat khau dang o
+let memberRoom = null;
+let memberPass = '';     // Mật khẩu để kết nối lại phòng đang tham gia // phong va mat khau dang o
 let tryPass = '';                             // mat khau dang thu
 let lastRooms = [];                           // danh sach phong moi nhat tu server
 let currentUsers = [];                        // nguoi dang o trong phong hien tai
@@ -99,12 +99,10 @@ function login(user) {
   myName = user.username;
 
   // Xóa trạng thái phòng của phiên trước
-  currentRoom = 'chung';
+ currentRoom = null;
 currentPass = '';
-
-memberRoom = 'chung';
+memberRoom = null;
 memberPass = '';
-
 tryPass = '';
 
   $('login').classList.add('hidden');
@@ -223,13 +221,13 @@ $('logoutBtn').addEventListener('click', async () => {
 
     myName = '';
 
-      currentRoom = 'chung';
-      currentPass = '';
+      currentRoom = null;
+currentPass = '';
 
-      memberRoom = 'chung';
-      memberPass = '';
+memberRoom = null;
+memberPass = '';
 
-      tryPass = '';
+tryPass = '';
 
     $('app').classList.add('hidden');
     $('login').classList.remove('hidden');
@@ -261,14 +259,22 @@ function requestViewRoom(room, pass) {
 // 2. Lang nghe su kien tu server
 function setupSocket() {
   // Chay MOI LAN ket noi duoc (ke ca ket noi lai)
-  socket.on('connect', () => requestJoin(memberRoom, memberPass));
+ socket.on('connect', () => {
+  if (memberRoom) {
+    requestJoin(memberRoom, memberPass);
+  } else {
+    console.log('Đã kết nối máy chủ. Chưa tham gia phòng nào.');
+  }
+});
 
   socket.on('disconnect', (reason) => {
     leaveVoice(false); // mat ket noi thi tu roi voice (noi lai se tu vao lai)
     const note = reason === 'io server disconnect'
       ? '(bi ngat ket noi, hay tai lai trang)'
       : '(mat ket noi, dang thu lai...)';
-    $('roomTitle').textContent = '# ' + currentRoom + '  ' + note;
+    $('roomTitle').textContent = currentRoom
+  ? '# ' + currentRoom + '  ' + note
+  : 'Chưa tham gia phòng ' + note;
   });
 
   socket.on('rooms', (list) => {
@@ -312,15 +318,19 @@ socket.on('viewed', ({ room, history, users }) => {
   socket.on('sys', addSystem);
   socket.on('warn', (text) => alert(text));
   socket.on('retry-login', () => {
-    leaveVoice(false);
-    currentRoom = 'chung';
-    currentPass = '';
-    currentUsers = [];
-    voiceNames = [];
-    socket.disconnect();
-    $('app').classList.add('hidden');
-    $('login').classList.remove('hidden');
-  });
+  leaveVoice(false);
+  currentRoom = null;
+  currentPass = '';
+  memberRoom = null;
+  memberPass = '';
+  tryPass = '';
+  currentUsers = [];
+  voiceNames = [];
+  voiceMembers = [];
+  socket.disconnect();
+  $('app').classList.add('hidden');
+  $('login').classList.remove('hidden');
+});
 
   // ---- Su kien voice tu server ----
   socket.on('voice-users', (names) => {
@@ -590,7 +600,15 @@ async function joinVoice() {
   joining = true;
   voiceFull = false;
   updateVoiceUI();
-  const myRoom = memberRoom;
+ const myRoom = memberRoom;
+
+if (!myRoom) {
+  joining = false;
+  updateVoiceUI();
+  toast('Bạn cần tham gia một phòng trước khi bật voice.');
+  return;
+}
+
 if (myRoom === 'chung') {
   joining = false;
   updateVoiceUI();
