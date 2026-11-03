@@ -71,12 +71,20 @@ function makeChip(name, inVoiceNow) {
   label.className = 'cname';
   label.textContent = name; // textContent: an toan
   chip.append(dot, label);
-  if (inVoiceNow) {
-    const badge = document.createElement('span');
-    badge.className = 'vbadge';
-    badge.textContent = '🎙';
-    chip.appendChild(badge);
-  }
+ if (inVoiceNow) {
+  const badge = document.createElement('button');
+  badge.type = 'button';
+  badge.className = 'vbadge';
+  badge.textContent = '🎙';
+  badge.title = 'Điều chỉnh âm lượng ' + name;
+
+  badge.addEventListener('click', (e) => {
+    e.stopPropagation(); // Không kích hoạt click chọn phòng
+    openPeerVolumeForName(name);
+  });
+
+  chip.appendChild(badge);
+}
   return chip;
 }
 
@@ -274,19 +282,7 @@ function renderUsers(users) {
     const li = document.createElement('li');
     const inVoiceNow = voiceNames.includes(u);
     li.appendChild(makeChip(u, inVoiceNow));
-    if (inVoiceNow && u !== myName) {
-      li.classList.add('voice-user-volume-target');
-      li.title = 'Nhấn để điều chỉnh âm lượng người này';
-      li.tabIndex = 0;
-      li.setAttribute('role', 'button');
-      li.addEventListener('click', () => openPeerVolumeForName(u));
-      li.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          openPeerVolumeForName(u);
-        }
-      });
-    }
+    
     $('userList').appendChild(li);
   });
   renderRooms();
