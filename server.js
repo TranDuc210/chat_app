@@ -11,15 +11,22 @@ const server = http.createServer(app);
 // ===== AUTHENTICATION =====
 app.use(express.json());
 
+if (!process.env.SESSION_SECRET) {
+  throw new Error('SESSION_SECRET chưa được cấu hình!');
+}
+
+// Render chạy sau HTTPS proxy
+app.set('trust proxy', 1);
+
 const sessionMiddleware = session({
-  secret: process.env.SESSION_SECRET || 'dev-secret-change-this',
+  secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   cookie: {
     httpOnly: true,
     sameSite: 'lax',
-    secure: false, // dùng false khi chạy localhost
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 ngày
+    secure: true,
+    maxAge: 7 * 24 * 60 * 60 * 1000
   }
 });
 
