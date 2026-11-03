@@ -100,13 +100,14 @@ async function acquireLoginLock(userId, sessionId, clientId) {
     client.release();
   }
 }
-async function hasLoginLock(userId, sessionId) {
+async function hasLoginLock(userId, sessionId, clientId) {
   const result = await db.query(
     `SELECT 1
      FROM account_login_locks
      WHERE user_id = $1
-       AND session_id = $2`,
-    [userId, sessionId]
+       AND session_id = $2
+       AND client_id = $3`,
+    [userId, sessionId, clientId]
   );
 
   return result.rows.length > 0;
@@ -131,10 +132,13 @@ io.use(async (socket, next) => {
       return next(new Error('Chưa đăng nhập.'));
     }
 
-    const allowed = await hasLoginLock(
-      session.userId,
-      sessionId
-    );
+  const clientId = clean(socket.handshake.auth?.cid, 40);
+
+const allowed = await hasLoginLock(
+  session.userId,
+  sessionId,
+  clientId
+);
 
     if (!allowed) {
       return next(new Error('Phiên đăng nhập không còn hợp lệ.'));
@@ -158,7 +162,11 @@ app.post('/api/register', async (req, res) => {
     const email = String(req.body.email || '').trim().toLowerCase();
     const password = String(req.body.password || '');
     const clientId = clean(req.body.cid, 40);
-
+    if (!clientId) {
+  return res.status(400).json({
+    error: 'Không xác định được tab. Vui lòng tải lại trang.'
+  });
+}
     if (username.length < 3 || username.length > 20) {
       return res.status(400).json({
         error: 'Tên tài khoản phải từ 3 đến 20 ký tự.'
@@ -266,13 +274,21 @@ app.post('/api/login', async (req, res) => {
   try {
     const login = String(req.body.login || '').trim();
     const password = String(req.body.password || '');
+    const clientId = clean(req.body.cid, 40);
 
-    const result = await db.query(`
-  SELECT * FROM users
-  WHERE username = $1 OR email = $2
-`, [login, login.toLowerCase()]);
+    if (!clientId) {
+      return res.status(400).json({
+        error: 'Không xác định được tab. Vui lòng tải lại trang.'
+      });
+    }
 
-const user = result.rows[0];
+    const result = await db.query(
+      `SELECT * FROM users
+       WHERE username = $1 OR email = $2`,
+      [login, login.toLowerCase()]
+    );
+
+    const user = result.rows[0];
 
     if (!user || !(await bcrypt.compare(password, user.password_hash))) {
       return res.status(401).json({
@@ -280,27 +296,77 @@ const user = result.rows[0];
       });
     }
 
-    req.session.userId = user.id;
+    // Nếu tài khoản đang có phiên hoạt động, từ chối trước khi đổi session.
+    const active = await db.query(
+      `SELECT 1
+       FROM account_login_locks l
+       JOIN user_sessions s ON s.sid = l.session_id
+       WHERE l.user_id = $1 AND s.expire > NOW()`,
+      [user.id]
+    );
 
-req.session.save((err) => {
-  if (err) {
-    console.error(err);
-    return res.status(500).json({
-      error: 'Không thể lưu phiên đăng nhập.'
-    });
-  }
-
-  res.json({
-    message: 'Đăng nhập thành công!',
-    user: {
-      id: user.id,
-      username: user.username,
-      email: user.email
+    if (active.rows.length > 0) {
+      return res.status(409).json({
+        error: 'Tài khoản đang đăng nhập trên thiết bị hoặc tab khác. Hãy đăng xuất ở đó trước.'
+      });
     }
-  });
-});
+
+    req.session.regenerate((err) => {
+      if (err) {
+        console.error('Lỗi tạo session đăng nhập:', err);
+        return res.status(500).json({
+          error: 'Không thể tạo phiên đăng nhập.'
+        });
+      }
+
+      req.session.userId = user.id;
+
+      req.session.save(async (saveErr) => {
+        if (saveErr) {
+          console.error('Lỗi lưu session đăng nhập:', saveErr);
+          return res.status(500).json({
+            error: 'Không thể lưu phiên đăng nhập.'
+          });
+        }
+
+        try {
+          const allowed = await acquireLoginLock(
+            user.id,
+            req.sessionID,
+            clientId
+          );
+
+          if (!allowed) {
+            return req.session.destroy(() => {
+              res.clearCookie('connect.sid');
+              res.status(409).json({
+                error: 'Tài khoản đang đăng nhập trên thiết bị hoặc tab khác.'
+              });
+            });
+          }
+
+          res.json({
+            message: 'Đăng nhập thành công!',
+            user: {
+              id: user.id,
+              username: user.username,
+              email: user.email
+            }
+          });
+        } catch (lockErr) {
+          console.error('Lỗi tạo khóa đăng nhập:', lockErr);
+
+          req.session.destroy(() => {
+            res.clearCookie('connect.sid');
+            res.status(500).json({
+              error: 'Không thể kiểm tra phiên đăng nhập.'
+            });
+          });
+        }
+      });
+    });
   } catch (err) {
-    console.error(err);
+    console.error('Lỗi API đăng nhập:', err);
     res.status(500).json({ error: 'Lỗi server.' });
   }
 });
@@ -310,9 +376,12 @@ app.get('/api/me', async (req, res) => {
   if (!req.session.userId) {
     return res.status(401).json({ error: 'Chưa đăng nhập.' });
   }
+const clientId = clean(req.get('X-Client-ID'), 40);
+
 const allowed = await hasLoginLock(
   req.session.userId,
-  req.sessionID
+  req.sessionID,
+  clientId
 );
 
 if (!allowed) {
@@ -591,10 +660,13 @@ io.on('connection', (socket) => {
   const userId = socket.request.session.userId;
   socket.use(async (event, next) => {
   try {
-    const allowed = await hasLoginLock(
-      userId,
-      socket.request.sessionID
-    );
+    const clientId = clean(socket.handshake.auth?.cid, 40);
+
+const allowed = await hasLoginLock(
+  userId,
+  socket.request.sessionID,
+  clientId
+);
 
     if (!allowed) {
       socket.emit('retry-login');

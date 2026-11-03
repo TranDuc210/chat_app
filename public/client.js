@@ -108,7 +108,10 @@ tryPass = '';
   $('login').classList.add('hidden');
   $('app').classList.remove('hidden');
 
-  socket = io({ transports: ['websocket'] });
+  socket = io({
+  transports: ['websocket'],
+  auth: { cid }
+});
   setupSocket();
 }
 
@@ -129,9 +132,8 @@ $('loginForm').addEventListener('submit', async (e) => {
       headers: {
         'Content-Type': 'application/json'
       },
-     body: JSON.stringify({
-  username,
-  email,
+   body: JSON.stringify({
+  login: loginInput,
   password,
   cid
 })
@@ -171,7 +173,8 @@ $('registerForm').addEventListener('submit', async (e) => {
       body: JSON.stringify({
         username,
         email,
-        password
+        password,
+        cid
       })
     });
 
@@ -1533,7 +1536,11 @@ renderSettings();
 // Kiểm tra tài khoản đã đăng nhập trước đó
 async function checkLogin() {
   try {
-    const res = await fetch('/api/me');
+    const res = await fetch('/api/me', {
+  headers: {
+    'X-Client-ID': cid
+  }
+});
     const data = await res.json();
 
     if (res.ok && data.user) {
