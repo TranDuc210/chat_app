@@ -766,26 +766,226 @@ async function refreshDevices(askPermission) {
   renderDevices();
 }
 
+
+/* =========================================================
+   CUSTOM AUDIO DEVICE DROPDOWN
+   Thay hàm fillSelect cũ bằng toàn bộ phần này
+========================================================= */
+
+function setupDeviceDropdown(sel) {
+  if (sel._customDeviceDropdown) return;
+
+  sel.classList.add('native-device-select');
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'device-select';
+  wrapper.dataset.selectId = sel.id;
+
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.className = 'device-select-trigger';
+  trigger.setAttribute('aria-haspopup', 'listbox');
+  trigger.setAttribute('aria-expanded', 'false');
+
+  const icon = document.createElement('span');
+  icon.className = 'device-select-icon';
+  icon.textContent = sel.id === 'micSelect' ? '🎙' : '🎧';
+
+  const label = document.createElement('span');
+  label.className = 'device-select-label';
+
+  const arrow = document.createElement('span');
+  arrow.className = 'device-select-arrow';
+  arrow.textContent = '⌄';
+
+  trigger.append(icon, label, arrow);
+
+  const menu = document.createElement('div');
+  menu.className = 'device-select-menu';
+  menu.setAttribute('role', 'listbox');
+  menu.hidden = true;
+
+  wrapper.append(trigger, menu);
+
+  sel.insertAdjacentElement('afterend', wrapper);
+
+  sel._customDeviceDropdown = {
+    wrapper,
+    trigger,
+    label,
+    icon,
+    arrow,
+    menu
+  };
+
+  trigger.addEventListener('click', () => {
+    if (sel.disabled) return;
+
+    const isOpen = !menu.hidden;
+
+    closeAllDeviceDropdowns();
+
+    if (!isOpen) {
+      menu.hidden = false;
+      wrapper.classList.add('open');
+      trigger.setAttribute('aria-expanded', 'true');
+    }
+  });
+
+  trigger.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+
+      if (menu.hidden) {
+        trigger.click();
+      } else {
+        const first = menu.querySelector('.device-option');
+        if (first) first.focus();
+      }
+    }
+  });
+
+  menu.addEventListener('keydown', (e) => {
+    const items = [...menu.querySelectorAll('.device-option')];
+    const index = items.indexOf(document.activeElement);
+
+    if (e.key === 'Escape') {
+      closeAllDeviceDropdowns();
+      trigger.focus();
+    }
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      items[Math.min(index + 1, items.length - 1)]?.focus();
+    }
+
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      items[Math.max(index - 1, 0)]?.focus();
+    }
+  });
+
+  if (!window._deviceDropdownOutsideHandler) {
+    window._deviceDropdownOutsideHandler = true;
+
+    document.addEventListener('pointerdown', (e) => {
+      if (!e.target.closest('.device-select')) {
+        closeAllDeviceDropdowns();
+      }
+    });
+  }
+}
+
+function closeAllDeviceDropdowns() {
+  document.querySelectorAll('.device-select').forEach((wrapper) => {
+    wrapper.classList.remove('open');
+
+    const menu = wrapper.querySelector('.device-select-menu');
+    const trigger = wrapper.querySelector('.device-select-trigger');
+
+    if (menu) menu.hidden = true;
+    if (trigger) trigger.setAttribute('aria-expanded', 'false');
+  });
+}
+
+function syncDeviceDropdown(sel) {
+  setupDeviceDropdown(sel);
+
+  const ui = sel._customDeviceDropdown;
+  if (!ui) return;
+
+  const selectedOption = sel.options[sel.selectedIndex];
+
+  ui.label.textContent = selectedOption
+    ? selectedOption.textContent
+    : 'Mac dinh cua may';
+
+  ui.trigger.disabled = sel.disabled;
+  ui.wrapper.classList.toggle('disabled', sel.disabled);
+
+  ui.menu.innerHTML = '';
+
+  [...sel.options].forEach((option, index) => {
+    const item = document.createElement('button');
+
+    item.type = 'button';
+    item.className = 'device-option';
+    item.setAttribute('role', 'option');
+
+    const isSelected = option.value === sel.value;
+
+    item.setAttribute('aria-selected', String(isSelected));
+
+    const itemIcon = document.createElement('span');
+    itemIcon.className = 'device-option-icon';
+
+    if (index === 0) {
+      itemIcon.textContent = '⚙';
+    } else {
+      itemIcon.textContent = sel.id === 'micSelect' ? '🎙' : '🎧';
+    }
+
+    const itemText = document.createElement('span');
+    itemText.className = 'device-option-text';
+    itemText.textContent = option.textContent;
+
+    const check = document.createElement('span');
+    check.className = 'device-option-check';
+    check.textContent = isSelected ? '✓' : '';
+
+    item.append(itemIcon, itemText, check);
+
+    item.addEventListener('click', () => {
+      sel.value = option.value;
+
+      // Gọi đúng logic onchange cũ trong client.js
+      sel.dispatchEvent(new Event('change', {
+        bubbles: true
+      }));
+
+      syncDeviceDropdown(sel);
+      closeAllDeviceDropdowns();
+    });
+
+    ui.menu.appendChild(item);
+  });
+}
+
 function fillSelect(sel, list, current, defLabel, prefix) {
+  setupDeviceDropdown(sel);
+
   sel.innerHTML = '';
+
   const def = document.createElement('option');
   def.value = '';
   def.textContent = defLabel;
+
   sel.appendChild(def);
+
   list.forEach((dev, i) => {
-    const o = document.createElement('option');
-    o.value = dev.deviceId;
-    o.textContent = dev.label || (prefix + ' ' + (i + 1));
-    sel.appendChild(o);
+    const option = document.createElement('option');
+
+    option.value = dev.deviceId;
+    option.textContent = dev.label || (prefix + ' ' + (i + 1));
+
+    sel.appendChild(option);
   });
+
   sel.value = current;
-  if (sel.value !== current) sel.value = ''; // thiet bi da luu khong con -> hien mac dinh
+
+  if (sel.value !== current) {
+    sel.value = '';
+  }
+
+  syncDeviceDropdown(sel);
 }
+
 
 function renderDevices() {
   fillSelect($('micSelect'), devices.mics, micId, 'Mac dinh cua may', 'Micro');
   fillSelect($('spkSelect'), devices.spks, spkId, 'Mac dinh cua may', 'Loa');
   $('spkSelect').disabled = !HAS_SINK;
+  syncDeviceDropdown($('spkSelect'));
   const notes = [];
   if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
     notes.push('Trinh duyet khong ho tro liet ke thiet bi am thanh.');

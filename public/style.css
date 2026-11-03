@@ -519,3 +519,258 @@ header {
         margin-bottom: 8px;
     }
 }
+
+/* =========================================================
+   CUSTOM AUDIO DEVICE DROPDOWN
+========================================================= */
+
+/* Ẩn select native nhưng giữ lại để client.js sử dụng */
+#voicePanel .native-device-select {
+    display: none !important;
+}
+
+/* Wrapper */
+#voicePanel .device-select {
+    position: relative;
+    width: 100%;
+    min-width: 0;
+}
+
+/* Nút dropdown */
+#voicePanel .device-select-trigger {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+
+    width: 100%;
+    min-height: 48px;
+    padding: 12px 14px;
+
+    border: 1px solid #454d5d;
+    border-radius: 11px;
+
+    background: linear-gradient(145deg, #292e38, #20242d);
+    color: #edf2ff;
+
+    cursor: pointer;
+    text-align: left;
+
+    transition:
+        border-color 0.2s,
+        background 0.2s,
+        box-shadow 0.2s;
+}
+
+#voicePanel .device-select-trigger:hover {
+    background: #303846;
+    border-color: #759ee4;
+}
+
+#voicePanel .device-select.open .device-select-trigger {
+    border-color: #83afff;
+    box-shadow: 0 0 0 3px rgba(115, 164, 255, 0.13);
+}
+
+/* Icon bên trái */
+#voicePanel .device-select-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    flex-shrink: 0;
+
+    width: 32px;
+    height: 32px;
+
+    border-radius: 8px;
+
+    background: #35435a;
+    color: #9fc2ff;
+
+    font-size: 17px;
+}
+
+/* Tên thiết bị */
+#voicePanel .device-select-label {
+    flex: 1;
+    min-width: 0;
+
+    font-size: 14px;
+    font-weight: 500;
+
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Mũi tên */
+#voicePanel .device-select-arrow {
+    color: #9bbcff;
+    font-size: 19px;
+
+    transition: transform 0.2s;
+}
+
+#voicePanel .device-select.open .device-select-arrow {
+    transform: rotate(180deg);
+}
+
+/* Disabled */
+#voicePanel .device-select.disabled {
+    opacity: 0.45;
+    pointer-events: none;
+}
+
+/* Menu */
+#voicePanel .device-select-menu {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    right: 0;
+
+    z-index: 100;
+
+    padding: 6px;
+
+    background: #20242d;
+    border: 1px solid #454d5d;
+    border-radius: 12px;
+
+    box-shadow:
+        0 12px 35px rgba(0, 0, 0, 0.45),
+        0 2px 8px rgba(0, 0, 0, 0.25);
+
+    max-height: 240px;
+    overflow-y: auto;
+
+    animation: deviceDropdownIn 0.16s ease;
+}
+
+#voicePanel .device-select-menu[hidden] {
+    display: none !important;
+}
+
+/* Scrollbar menu */
+#voicePanel .device-select-menu::-webkit-scrollbar {
+    width: 6px;
+}
+
+#voicePanel .device-select-menu::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+#voicePanel .device-select-menu::-webkit-scrollbar-thumb {
+    background: #50596a;
+    border-radius: 10px;
+}
+
+/* Từng option */
+#voicePanel .device-option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+
+    width: 100%;
+    min-height: 42px;
+
+    padding: 10px 12px;
+
+    border: 1px solid transparent;
+    border-radius: 8px;
+
+    background: transparent;
+    color: #dce3ef;
+
+    text-align: left;
+    font-size: 13px;
+    font-weight: 400;
+
+    cursor: pointer;
+
+    transition:
+        background 0.15s,
+        border-color 0.15s,
+        color 0.15s;
+}
+
+/* Hover */
+#voicePanel .device-option:hover,
+#voicePanel .device-option:focus-visible {
+    background: #303947;
+    border-color: #45536a;
+    outline: none;
+}
+
+/* Option đang chọn */
+#voicePanel .device-option[aria-selected="true"] {
+    background: #2d3d56;
+    border-color: #526f9e;
+    color: #ffffff;
+}
+
+/* Icon option */
+#voicePanel .device-option-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    flex-shrink: 0;
+
+    width: 28px;
+    height: 28px;
+
+    border-radius: 7px;
+
+    background: #303642;
+    font-size: 14px;
+}
+
+#voicePanel .device-option[aria-selected="true"]
+.device-option-icon {
+    background: #405a80;
+}
+
+/* Tên option */
+#voicePanel .device-option-text {
+    flex: 1;
+    min-width: 0;
+
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Dấu check */
+#voicePanel .device-option-check {
+    width: 18px;
+    flex-shrink: 0;
+
+    color: #91baff;
+    font-weight: 700;
+    text-align: center;
+}
+
+/* Animation */
+@keyframes deviceDropdownIn {
+    from {
+        opacity: 0;
+        transform: translateY(-5px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Mobile */
+@media (max-width: 600px) {
+    #voicePanel .device-select-menu {
+        max-height: 200px;
+    }
+
+    #voicePanel .device-select-trigger {
+        min-height: 46px;
+    }
+}
+
