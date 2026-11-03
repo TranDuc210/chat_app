@@ -26,9 +26,11 @@ const sessionMiddleware = session({
     tableName: 'user_sessions',
     createTableIfMissing: true
   }),
+
   secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
+
   cookie: {
     httpOnly: true,
     sameSite: 'lax',

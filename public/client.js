@@ -93,6 +93,11 @@ function makeChip(name, inVoiceNow) {
 function login(user) {
   myName = user.username;
 
+  // Xóa trạng thái phòng của phiên trước
+  currentRoom = 'chung';
+  currentPass = '';
+  tryPass = '';
+
   $('login').classList.add('hidden');
   $('app').classList.remove('hidden');
 
@@ -208,6 +213,10 @@ $('logoutBtn').addEventListener('click', async () => {
     }
 
     myName = '';
+
+currentRoom = 'chung';
+currentPass = '';
+tryPass = '';
 
     $('app').classList.add('hidden');
     $('login').classList.remove('hidden');
