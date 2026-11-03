@@ -796,7 +796,18 @@ function setupDeviceDropdown(sel) {
 
   const arrow = document.createElement('span');
   arrow.className = 'device-select-arrow';
-  arrow.textContent = '⌄';
+  arrow.innerHTML = `
+    <svg viewBox="0 0 24 24"
+         width="18"
+         height="18"
+         fill="none"
+         stroke="currentColor"
+         stroke-width="2.2"
+         stroke-linecap="round"
+         stroke-linejoin="round">
+        <path d="m7 10 5 5 5-5"/>
+    </svg>
+`;
 
   trigger.append(icon, label, arrow);
 

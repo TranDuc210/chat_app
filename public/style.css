@@ -1081,3 +1081,134 @@ header {
         transition: none !important;
     }
 }
+
+/* ================================================
+   FIX AUDIO DROPDOWN LAYER + ARROW
+================================================ */
+
+/* Khi dropdown mở, nâng nó lên trên các thành phần khác */
+#voicePanel .device-select {
+    position: relative;
+    z-index: 1;
+}
+
+#voicePanel .device-select.open {
+    z-index: 1000;
+}
+
+/* Không để menu trong suốt */
+#voicePanel .device-select-menu {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    right: 0;
+
+    z-index: 1001;
+
+    background: #20242d !important;
+    opacity: 1 !important;
+
+    border: 1px solid #414b5d;
+    border-radius: 12px;
+
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+
+    box-shadow:
+        0 18px 40px rgba(0, 0, 0, 0.55),
+        0 4px 12px rgba(0, 0, 0, 0.25);
+
+    overflow-y: auto;
+    max-height: 220px;
+}
+
+/* Các option có nền rõ */
+#voicePanel .device-option {
+    position: relative;
+    z-index: 1;
+
+    background: transparent;
+    border: 1px solid transparent;
+
+    min-height: 44px;
+    margin-bottom: 2px;
+}
+
+/* Hover */
+#voicePanel .device-option:hover {
+    background: #303a4b;
+    border-color: #3d4c64;
+}
+
+/* Selected */
+#voicePanel .device-option[aria-selected="true"] {
+    background: #30415b;
+    border-color: #4c6488;
+}
+
+/* Icon mũi tên */
+#voicePanel .device-select-arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    width: 30px;
+    height: 30px;
+
+    background: #303947;
+    border-radius: 8px;
+
+    color: #a9c8ff;
+
+    transition:
+        transform 220ms cubic-bezier(.2,.8,.2,1),
+        background 180ms ease,
+        color 180ms ease;
+}
+
+/* Xoay icon khi mở */
+#voicePanel .device-select.open
+.device-select-arrow {
+    transform: rotate(180deg);
+    background: #3b4c68;
+    color: #ffffff;
+}
+
+/* SVG không bị biến dạng */
+#voicePanel .device-select-arrow svg {
+    display: block;
+    flex-shrink: 0;
+}
+
+/* Không dùng ký tự cũ */
+#voicePanel .device-select-arrow {
+    font-size: 0;
+}
+
+/* Nâng menu trên các field kế tiếp */
+#voicePanel .field {
+    position: relative;
+}
+
+/* Giữ option không bị chữ phía sau che */
+#voicePanel .device-option-text {
+    position: relative;
+    z-index: 2;
+}
+
+/* Animation */
+@keyframes deviceMenuSmooth {
+    from {
+        opacity: 0;
+        transform: translateY(-5px) scale(.985);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+#voicePanel .device-select-menu:not([hidden]) {
+    animation: deviceMenuSmooth 180ms ease-out;
+}
