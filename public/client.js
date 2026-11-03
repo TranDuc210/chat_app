@@ -7,6 +7,8 @@ let tryPass = '';                             // mat khau dang thu
 let lastRooms = [];                           // danh sach phong moi nhat tu server
 let currentUsers = [];                        // nguoi dang o trong phong hien tai
 let voiceNames = [];                          // nguoi dang trong voice cua phong hien tai
+let voiceMembers = [];                         // [{ id, name }] socket IDs + ten thanh vien voice
+let activeVolumePeerId = null;                 // peer dang mo hop thoai am luong
 
 // Luu cai dat tren may (con nguyen sau khi dong trinh duyet)
 const store = {
@@ -119,12 +121,13 @@ function setupSocket() {
     renderRooms();
   });
 
-  socket.on('joined', ({ room, history, users, voice }) => {
+  socket.on('joined', ({ room, history, users, voice, voiceMembers: members }) => {
     // Moi lan vao/doi phong, server deu xoa ban khoi voice -> client cung phai roi voice
     if (inVoice) leaveVoice(false);
     currentRoom = room;
     currentPass = tryPass; // nho mat khau de tu vao lai khi mat ket noi
     voiceNames = voice || [];
+    voiceMembers = members || [];
     $('roomTitle').textContent = '# ' + room;
     $('messages').innerHTML = '';
     history.forEach(addMessage);
@@ -152,6 +155,10 @@ function setupSocket() {
   // ---- Su kien voice tu server ----
   socket.on('voice-users', (names) => {
     voiceNames = names;
+    renderUsers(currentUsers);
+  });
+  socket.on('voice-members', (members) => {
+    voiceMembers = Array.isArray(members) ? members : [];
     renderUsers(currentUsers);
   });
   socket.on('voice-peers', (ids) => {
@@ -265,7 +272,21 @@ function renderUsers(users) {
   $('userList').innerHTML = '';
   users.forEach((u) => {
     const li = document.createElement('li');
-    li.appendChild(makeChip(u, voiceNames.includes(u)));
+    const inVoiceNow = voiceNames.includes(u);
+    li.appendChild(makeChip(u, inVoiceNow));
+    if (inVoiceNow && u !== myName) {
+      li.classList.add('voice-user-volume-target');
+      li.title = 'Nhấn để điều chỉnh âm lượng người này';
+      li.tabIndex = 0;
+      li.setAttribute('role', 'button');
+      li.addEventListener('click', () => openPeerVolumeForName(u));
+      li.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          openPeerVolumeForName(u);
+        }
+      });
+    }
     $('userList').appendChild(li);
   });
   renderRooms();
@@ -633,6 +654,7 @@ function updateVoiceUI() {
 function closePeer(id) {
   const peer = peers.get(id);
   if (!peer) return;
+  if (activeVolumePeerId === id) closePeerVolumeDialog();
   peers.delete(id);
   try { peer.pc.close(); } catch (e) { /* bo qua */ }
   if (peer.audio) {
@@ -652,7 +674,7 @@ function applySink(a) {
 // Tao ket noi truc tiep voi 1 nguoi. initiator = true thi minh la ben goi truoc.
 function createPeer(id, initiator) {
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-  const peer = { pc, audio: null, queue: [] };
+  const peer = { pc, audio: null, queue: [], name: getVoiceMemberName(id) };
   peers.set(id, peer);
 
   if (localStream) {
@@ -672,12 +694,13 @@ function createPeer(id, initiator) {
     const a = document.createElement('audio');
     a.autoplay = true;
     a.srcObject = e.streams[0] || new MediaStream([e.track]);
+    peer.audio = a;
     $('audioBox').appendChild(a);
     applySink(a);
+    applyPeerVolume(id);
     a.play().catch(() => {
       toastOnce('autoplay', 'Trinh duyet dang chan am thanh. Hay bam vao trang mot lan de nghe.');
     });
-    peer.audio = a;
   };
 
   pc.onconnectionstatechange = () => {
@@ -1167,6 +1190,85 @@ function resumeAudio() {
 }
 document.addEventListener('pointerdown', resumeAudio, true);
 document.addEventListener('keydown', resumeAudio, true);
+
+// ---- Am luong nghe rieng tung thanh vien voice (local-only) ----
+function getVoiceMemberName(id) {
+  const member = voiceMembers.find((m) => m && m.id === id);
+  const peer = peers.get(id);
+  return (member && member.name) || (peer && peer.name) || '';
+}
+
+function peerVolumeKey(name) {
+  return 'peerVolume:' + currentRoom + ':' + name;
+}
+function peerMuteKey(name) {
+  return 'peerMuted:' + currentRoom + ':' + name;
+}
+function getPeerVolume(name) {
+  const value = Number(store.get(peerVolumeKey(name), '100'));
+  return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 100;
+}
+function getPeerMuted(name) {
+  return store.get(peerMuteKey(name), '0') === '1';
+}
+function applyPeerVolume(id) {
+  const peer = peers.get(id);
+  if (!peer || !peer.audio) return;
+  const name = getVoiceMemberName(id);
+  if (!name) return;
+  peer.name = name;
+  peer.audio.volume = getPeerVolume(name) / 100;
+  peer.audio.muted = getPeerMuted(name);
+}
+
+function openPeerVolumeForName(name) {
+  const member = voiceMembers.find((m) => m && m.name === name);
+  if (!member || !peers.has(member.id)) {
+    toast('Chua ket noi duoc am thanh voi thanh vien nay.');
+    return;
+  }
+  activeVolumePeerId = member.id;
+  const peer = peers.get(member.id);
+  if (peer) peer.name = name;
+
+  $('peerVolumeName').textContent = name;
+  $('peerVolumeSlider').value = String(getPeerVolume(name));
+  $('peerVolumeValue').textContent = getPeerVolume(name) + '%';
+  $('peerMuteCheckbox').checked = getPeerMuted(name);
+  $('peerVolumeModal').classList.remove('hidden');
+}
+function closePeerVolumeDialog() {
+  activeVolumePeerId = null;
+  $('peerVolumeModal').classList.add('hidden');
+}
+function activeVolumePeerName() {
+  return activeVolumePeerId ? getVoiceMemberName(activeVolumePeerId) : '';
+}
+
+$('peerVolumeSlider').addEventListener('input', () => {
+  const name = activeVolumePeerName();
+  if (!name || !activeVolumePeerId) return;
+  const value = Number($('peerVolumeSlider').value);
+  store.set(peerVolumeKey(name), String(value));
+  $('peerVolumeValue').textContent = value + '%';
+  applyPeerVolume(activeVolumePeerId);
+});
+$('peerMuteCheckbox').addEventListener('change', () => {
+  const name = activeVolumePeerName();
+  if (!name || !activeVolumePeerId) return;
+  store.set(peerMuteKey(name), $('peerMuteCheckbox').checked ? '1' : '0');
+  applyPeerVolume(activeVolumePeerId);
+});
+$('closePeerVolumeBtn').addEventListener('click', closePeerVolumeDialog);
+$('closePeerVolumeBtnBottom').addEventListener('click', closePeerVolumeDialog);
+$('peerVolumeModal').addEventListener('click', (e) => {
+  if (e.target === $('peerVolumeModal')) closePeerVolumeDialog();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('peerVolumeModal').classList.contains('hidden')) {
+    closePeerVolumeDialog();
+  }
+});
 
 // ---- Hop cai dat voice ----
 function renderSettings() {

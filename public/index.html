@@ -67,6 +67,50 @@
     </form>
   </div>
 
+  <!-- Hop thoai dieu chinh am luong nghe tung thanh vien -->
+  <div id="peerVolumeModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="peerVolumeTitle">
+    <div id="peerVolumePanel">
+      <div class="peer-volume-head">
+        <div>
+          <h3 id="peerVolumeTitle">Điều chỉnh âm lượng</h3>
+          <div class="peer-volume-subtitle">Âm thanh của thành viên</div>
+        </div>
+        <button type="button" id="closePeerVolumeBtn" class="peer-volume-close" aria-label="Đóng">×</button>
+      </div>
+
+      <div class="peer-volume-user">
+        <div class="peer-volume-avatar">♬</div>
+        <div class="peer-volume-user-info">
+          <strong id="peerVolumeName">Thành viên</strong>
+          <span>Đang trong phòng voice</span>
+        </div>
+      </div>
+
+      <div class="peer-volume-control">
+        <div class="peer-volume-label-row">
+          <label for="peerVolumeSlider">Âm lượng</label>
+          <span id="peerVolumeValue">100%</span>
+        </div>
+        <div class="peer-volume-slider-row">
+          <span class="peer-volume-icon" aria-hidden="true">−</span>
+          <input type="range" id="peerVolumeSlider" min="0" max="100" step="1" value="100">
+          <span class="peer-volume-icon" aria-hidden="true">+</span>
+        </div>
+        <p>Chỉ thay đổi âm thanh bạn nghe từ người này.</p>
+      </div>
+
+      <label class="peer-volume-mute-row" for="peerMuteCheckbox">
+        <span class="peer-volume-mute-copy">
+          <strong>Tắt âm thành viên</strong>
+          <small>Chỉ bạn sẽ không nghe thấy người này</small>
+        </span>
+        <input type="checkbox" id="peerMuteCheckbox">
+      </label>
+
+      <button type="button" id="closePeerVolumeBtnBottom" class="peer-volume-done">Đóng</button>
+    </div>
+  </div>
+
   <!-- Hop cai dat voice -->
   <div id="voiceModal" class="hidden">
     <div id="voicePanel">
