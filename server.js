@@ -3,16 +3,156 @@ const http = require('http');
 const fs = require('fs');
 const crypto = require('crypto');
 const { Server } = require('socket.io');
-
+const session = require('express-session');
+const bcrypt = require('bcrypt');
+const db = require('./database');
 const app = express();
 const server = http.createServer(app);
+// ===== AUTHENTICATION =====
+app.use(express.json());
 
+const sessionMiddleware = session({
+  secret: process.env.SESSION_SECRET || 'dev-secret-change-this',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: false, // dùng false khi chạy localhost
+    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 ngày
+  }
+});
+
+app.use(sessionMiddleware);
 // Tiet kiem bang thong: chi dung websocket, bat nen du lieu
 // maxHttpBufferSize = 20000: du cho cac goi "thuong luong" voice (SDP) di qua server
 const io = new Server(server, {
   transports: ['websocket'],
   perMessageDeflate: { threshold: 256 },
   maxHttpBufferSize: 20000
+});
+// Cho Socket.IO truy cập session đăng nhập
+io.engine.use(sessionMiddleware);
+// ===== API TAI KHOAN =====
+
+// Dang ky
+app.post('/api/register', async (req, res) => {
+  try {
+    const username = String(req.body.username || '').trim();
+    const email = String(req.body.email || '').trim().toLowerCase();
+    const password = String(req.body.password || '');
+
+    if (username.length < 3 || username.length > 20) {
+      return res.status(400).json({
+        error: 'Tên tài khoản phải từ 3 đến 20 ký tự.'
+      });
+    }
+
+    if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+      return res.status(400).json({
+        error: 'Tên tài khoản chỉ được có chữ, số và dấu _.'
+      });
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({
+        error: 'Email không hợp lệ.'
+      });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({
+        error: 'Mật khẩu phải có ít nhất 8 ký tự.'
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    const result = db.prepare(`
+      INSERT INTO users (username, email, password_hash)
+      VALUES (?, ?, ?)
+    `).run(username, email, passwordHash);
+
+    req.session.userId = result.lastInsertRowid;
+
+    res.json({
+      message: 'Đăng ký thành công!',
+      user: {
+        id: result.lastInsertRowid,
+        username,
+        email
+      }
+    });
+  } catch (err) {
+    if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      return res.status(409).json({
+        error: 'Tên tài khoản hoặc email đã được sử dụng.'
+      });
+    }
+
+    console.error(err);
+    res.status(500).json({ error: 'Lỗi server.' });
+  }
+});
+
+// Dang nhap
+app.post('/api/login', async (req, res) => {
+  try {
+    const login = String(req.body.login || '').trim();
+    const password = String(req.body.password || '');
+
+    const user = db.prepare(`
+      SELECT * FROM users
+      WHERE username = ? OR email = ?
+    `).get(login, login.toLowerCase());
+
+    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+      return res.status(401).json({
+        error: 'Tên tài khoản/email hoặc mật khẩu không đúng.'
+      });
+    }
+
+    req.session.userId = user.id;
+
+    res.json({
+      message: 'Đăng nhập thành công!',
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Lỗi server.' });
+  }
+});
+
+// Kiem tra tai khoan dang dang nhap
+app.get('/api/me', (req, res) => {
+  if (!req.session.userId) {
+    return res.status(401).json({ error: 'Chưa đăng nhập.' });
+  }
+
+  const user = db.prepare(`
+    SELECT id, username, email
+    FROM users
+    WHERE id = ?
+  `).get(req.session.userId);
+
+  if (!user) {
+    return res.status(401).json({ error: 'Tài khoản không tồn tại.' });
+  }
+
+  res.json({ user });
+});
+
+// Dang xuat
+app.post('/api/logout', (req, res) => {
+  req.session.destroy(() => {
+    res.clearCookie('connect.sid');
+    res.json({ message: 'Đã đăng xuất.' });
+  });
 });
 
 app.use(express.static('public'));
