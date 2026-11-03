@@ -282,19 +282,48 @@ try {
 }
 
 // ---- Luu du lieu ra file ----
-function saveNow() {
-  const out = {};
-  for (const name in rooms) {
-    const r = rooms[name];
-    out[name] = { history: r.history, salt: r.salt, hash: r.hash };
+async function saveNow() {
+  try {
+    for (const name in rooms) {
+      const r = rooms[name];
+
+      await db.query(
+        `INSERT INTO chat_rooms (room_name, history, salt, password_hash)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (room_name)
+         DO UPDATE SET
+           history = EXCLUDED.history,
+           salt = EXCLUDED.salt,
+           password_hash = EXCLUDED.password_hash,
+           updated_at = NOW()`,
+        [name, JSON.stringify(r.history), r.salt || null, r.hash || null]
+      );
+    }
+
+    dirty = false;
+  } catch (err) {
+    console.error('Lỗi lưu phòng chat vào Neon:', err);
   }
-  fs.writeFileSync(DATA_FILE, JSON.stringify(out));
-  dirty = false;
 }
-setInterval(() => { if (dirty) saveNow(); }, 5000);
-process.on('SIGINT', () => {
-  if (dirty) saveNow();
-  process.exit();
+let saving = false;
+
+setInterval(async () => {
+  if (!dirty || saving) return;
+
+  saving = true;
+  try {
+    await saveNow();
+  } finally {
+    saving = false;
+  }
+}, 5000);
+process.on('SIGINT', async () => {
+  if (dirty) {
+    await saveNow();
+  }
+
+  await db.end();
+  process.exit(0);
 });
 
 function getRoom(name, pass) {
@@ -579,4 +608,16 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log('Server chay tai http://localhost:' + PORT));
+
+(async () => {
+  try {
+    await loadRoomsFromDB();
+
+    server.listen(PORT, () => {
+      console.log('Server chay tai http://localhost:' + PORT);
+    });
+  } catch (err) {
+    console.error('Server không thể khởi động:', err);
+    process.exit(1);
+  }
+})();
