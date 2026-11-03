@@ -9,13 +9,66 @@
 <body>
 
   <!-- Man hinh dang nhap -->
-  <div id="login">
-    <form id="loginForm">
-      <h2>Vao chat</h2>
-      <input id="nameInput" placeholder="Ten cua ban" maxlength="20" required>
-      <button>Tham gia</button>
-    </form>
-  </div>
+  
+<div id="login">
+  <form id="loginForm">
+    <h2>Đăng nhập</h2>
+
+    <input
+      id="loginInput"
+      placeholder="Tên tài khoản hoặc email"
+      required
+    >
+
+    <input
+      id="loginPassword"
+      type="password"
+      placeholder="Mật khẩu"
+      required
+    >
+
+    <button type="submit">Đăng nhập</button>
+
+    <p>Chưa có tài khoản?
+      <button type="button" id="showRegisterBtn">Đăng ký</button>
+    </p>
+  </form>
+
+  <form id="registerForm" class="hidden">
+    <h2>Tạo tài khoản</h2>
+
+    <input
+      id="registerUsername"
+      placeholder="Tên tài khoản"
+      maxlength="20"
+      required
+    >
+
+    <input
+      id="registerEmail"
+      type="email"
+      placeholder="Email"
+      required
+    >
+
+    <input
+      id="registerPassword"
+      type="password"
+      placeholder="Mật khẩu (ít nhất 8 ký tự)"
+      minlength="8"
+      required
+    >
+
+    <button type="submit">Đăng ký</button>
+
+    <p>Đã có tài khoản?
+      <button type="button" id="showLoginBtn">Đăng nhập</button>
+    </p>
+  </form>
+
+  <p id="authError"></p>
+</div>
+
 
   <!-- Giao dien chinh -->
   <div id="app" class="hidden">
@@ -32,6 +85,7 @@
         <button id="voiceBtn" type="button" class="vbtn off">🎧 Bật voice</button>
         <button id="settingsBtn" type="button" title="Cai dat voice">⚙</button>
         <button id="usersBtn" type="button" class="icon">👥</button>
+        <button id="logoutBtn" type="button">Đăng xuất</button>
       </header>
       <div id="messages"></div>
       <form id="msgForm">

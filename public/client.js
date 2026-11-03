@@ -89,9 +89,10 @@ function makeChip(name, inVoiceNow) {
 }
 
 // 1. Dang nhap
-function login(name) {
-  myName = name;
-  sessionStorage.setItem('name', name); // nho ten de F5 tu vao lai
+
+function login(user) {
+  myName = user.username;
+
   $('login').classList.add('hidden');
   $('app').classList.remove('hidden');
 
@@ -99,16 +100,135 @@ function login(name) {
   setupSocket();
 }
 
-$('loginForm').addEventListener('submit', (e) => {
+
+
+// Xử lý đăng nhập tài khoản
+$('loginForm').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const name = $('nameInput').value.trim();
-  if (name) login(name);
+
+  const loginInput = $('loginInput').value.trim();
+  const password = $('loginPassword').value;
+
+  $('authError').textContent = '';
+
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        login: loginInput,
+        password
+      })
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      $('authError').textContent = data.error || 'Đăng nhập thất bại.';
+      return;
+    }
+
+    login(data.user);
+  } catch (err) {
+    console.error(err);
+    $('authError').textContent = 'Không thể kết nối máy chủ.';
+  }
+});
+
+
+// Xử lý đăng ký tài khoản
+$('registerForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+
+  const username = $('registerUsername').value.trim();
+  const email = $('registerEmail').value.trim();
+  const password = $('registerPassword').value;
+
+  $('authError').textContent = '';
+
+  try {
+    const res = await fetch('/api/register', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username,
+        email,
+        password
+      })
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      $('authError').textContent = data.error || 'Đăng ký thất bại.';
+      return;
+    }
+
+    login(data.user);
+  } catch (err) {
+    console.error(err);
+    $('authError').textContent = 'Không thể kết nối máy chủ.';
+  }
+});
+
+// Chuyển sang form đăng ký
+$('showRegisterBtn').addEventListener('click', () => {
+  $('loginForm').classList.add('hidden');
+  $('registerForm').classList.remove('hidden');
+  $('authError').textContent = '';
+});
+
+// Chuyển về form đăng nhập
+$('showLoginBtn').addEventListener('click', () => {
+  $('registerForm').classList.add('hidden');
+  $('loginForm').classList.remove('hidden');
+  $('authError').textContent = '';
+});
+
+$('logoutBtn').addEventListener('click', async () => {
+  try {
+    const res = await fetch('/api/logout', {
+      method: 'POST'
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      alert(data.error || 'Đăng xuất thất bại.');
+      return;
+    }
+
+    if (socket) {
+      socket.disconnect();
+      socket = null;
+    }
+
+    myName = '';
+
+    $('app').classList.add('hidden');
+    $('login').classList.remove('hidden');
+
+    $('loginForm').classList.remove('hidden');
+    $('registerForm').classList.add('hidden');
+
+    $('loginInput').value = '';
+    $('loginPassword').value = '';
+    $('authError').textContent = '';
+
+  } catch (err) {
+    console.error(err);
+    alert('Không thể kết nối máy chủ.');
+  }
 });
 
 // Gui yeu cau vao phong (kem mat khau neu co)
 function requestJoin(room, pass) {
   tryPass = pass || '';
-  socket.emit('join', { name: myName, room, pass: tryPass, cid });
+  socket.emit('join', { room, pass, cid });
 }
 
 // 2. Lang nghe su kien tu server
@@ -154,7 +274,6 @@ function setupSocket() {
     currentPass = '';
     currentUsers = [];
     voiceNames = [];
-    sessionStorage.removeItem('name'); // quen ten de khong bi lap vo han
     socket.disconnect();
     $('app').classList.add('hidden');
     $('login').classList.remove('hidden');
@@ -1327,5 +1446,19 @@ renderSettings();
 
 // 11. Neu tab nay da dang nhap truoc do (vd vua bam F5) thi tu vao lai
 // (doan nay PHAI nam o cuoi file)
-const savedName = sessionStorage.getItem('name');
-if (savedName) login(savedName);
+
+// Kiểm tra tài khoản đã đăng nhập trước đó
+async function checkLogin() {
+  try {
+    const res = await fetch('/api/me');
+    const data = await res.json();
+
+    if (res.ok && data.user) {
+      login(data.user);
+    }
+  } catch (err) {
+    console.error('Không thể kiểm tra đăng nhập:', err);
+  }
+}
+
+checkLogin();

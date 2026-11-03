@@ -6,8 +6,10 @@ const { Server } = require('socket.io');
 const session = require('express-session');
 const bcrypt = require('bcrypt');
 const db = require('./database');
+const PgSession = require('connect-pg-simple')(session);
 const app = express();
 const server = http.createServer(app);
+
 // ===== AUTHENTICATION =====
 app.use(express.json());
 
@@ -19,6 +21,11 @@ if (!process.env.SESSION_SECRET) {
 app.set('trust proxy', 1);
 
 const sessionMiddleware = session({
+  store: new PgSession({
+    pool: db,
+    tableName: 'user_sessions',
+    createTableIfMissing: true
+  }),
   secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
@@ -38,8 +45,18 @@ const io = new Server(server, {
   perMessageDeflate: { threshold: 256 },
   maxHttpBufferSize: 20000
 });
+
 // Cho Socket.IO truy cập session đăng nhập
 io.engine.use(sessionMiddleware);
+io.use((socket, next) => {
+  const session = socket.request.session;
+
+  if (!session || !session.userId) {
+    return next(new Error('Chưa đăng nhập.'));
+  }
+
+  next();
+});
 // ===== API TAI KHOAN =====
 
 // Dang ky
@@ -87,14 +104,21 @@ app.post('/api/register', async (req, res) => {
 
     req.session.userId = userId;
 
-    res.json({
-      message: 'Đăng ký thành công!',
-      user: {
-        id: userId,
-        username,
-        email
-      }
-    });
+    req.session.save((err) => {
+  if (err) {
+    console.error('Lỗi lưu phiên đăng ký:', err);
+    return res.status(500).json({ error: 'Không thể lưu phiên đăng ký.' });
+  }
+
+  res.json({
+    message: 'Đăng ký thành công!',
+    user: {
+      id: userId,
+      username,
+      email
+    }
+  });
+});
   } catch (err) {
     if (err.code === '23505') {
       return res.status(409).json({
@@ -128,14 +152,23 @@ const user = result.rows[0];
 
     req.session.userId = user.id;
 
-    res.json({
-      message: 'Đăng nhập thành công!',
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email
-      }
+req.session.save((err) => {
+  if (err) {
+    console.error(err);
+    return res.status(500).json({
+      error: 'Không thể lưu phiên đăng nhập.'
     });
+  }
+
+  res.json({
+    message: 'Đăng nhập thành công!',
+    user: {
+      id: user.id,
+      username: user.username,
+      email: user.email
+    }
+  });
+});
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Lỗi server.' });
@@ -164,12 +197,25 @@ const user = result.rows[0];
 });
 
 // Dang xuat
+
 app.post('/api/logout', (req, res) => {
-  req.session.destroy(() => {
+  if (!req.session) {
+    return res.json({ message: 'Đã đăng xuất.' });
+  }
+
+  req.session.destroy((err) => {
+    if (err) {
+      console.error('Lỗi đăng xuất:', err);
+      return res.status(500).json({
+        error: 'Không thể đăng xuất.'
+      });
+    }
+
     res.clearCookie('connect.sid');
     res.json({ message: 'Đã đăng xuất.' });
   });
 });
+
 
 app.use(express.static('public'));
 
@@ -314,8 +360,9 @@ setInterval(() => {
 }, SWEEP_MS);
 
 io.on('connection', (socket) => {
+   const userId = socket.request.session.userId;
   let currentRoom = null;
-  let username = 'Khach';
+  let username = '';
   let recent = [];       // chong spam tin nhan
   let failCount = 0;     // so lan sai mat khau
   let createTimes = [];  // thoi diem cac lan tao phong moi
@@ -330,14 +377,34 @@ io.on('connection', (socket) => {
     if (!currentRoom) socket.emit('retry-login');
   }
 
-  socket.on('join', ({ name, room, pass, cid }) => {
-    let replaced = false; // true neu day chi la tab nay vao lai (vd bam F5)
+    socket.on('join', async ({ room, pass, cid }) => {
+  let replaced = false;
+  let newName;
 
-    const myCid = clean(cid, 40);
-    cidOf.set(socket.id, myCid);
-    const newName = clean(name, 20) || 'Khach';
-    const roomName = clean(room, 20).toLowerCase() || 'chung';
-    const passText = clean(pass, 50);
+  try {
+    const result = await db.query(
+      'SELECT username FROM users WHERE id = $1',
+      [userId]
+    );
+
+    if (result.rows.length === 0) {
+      socket.emit('retry-login');
+      socket.disconnect(true);
+      return;
+    }
+
+    newName = result.rows[0].username;
+  } catch (err) {
+    console.error('Lỗi xác thực tài khoản Socket:', err);
+    socket.emit('warn', 'Không thể xác thực tài khoản. Vui lòng thử lại.');
+    return;
+  }
+
+  const myCid = clean(cid, 40);
+  cidOf.set(socket.id, myCid);
+
+  const roomName = clean(room, 20).toLowerCase() || 'chung';
+  const passText = clean(pass, 50);
 
     // Gioi han toc do doi phong
     const t0 = Date.now();
@@ -406,7 +473,7 @@ io.on('connection', (socket) => {
 
     currentRoom = roomName;
     const r = getRoom(roomName, passText); // neu chua co thi tao, kem mat khau (neu co)
-    r.users.set(socket.id, username);
+    r.users.set(socket.id, newName);
     r.emptySince = null;
     socket.join(roomName);
 
@@ -418,7 +485,7 @@ io.on('connection', (socket) => {
       voiceMembers: voiceMembers(r)
     });
     socket.to(roomName).emit('users', [...r.users.values()]);
-    if (SHOW_SYS_MSG && !replaced) socket.to(roomName).emit('sys', username + ' da vao phong');
+    if (SHOW_SYS_MSG && !replaced) socket.to(roomName).emit('sys', newName + ' da vao phong');
     scheduleRooms(); // cap nhat danh sach phong + nguoi trong phong cho moi nguoi
   });
 
