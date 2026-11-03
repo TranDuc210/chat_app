@@ -117,6 +117,11 @@ function roomList() {
 function voiceNames(r) {
   return [...r.voice].map((id) => r.users.get(id)).filter(Boolean);
 }
+function voiceMembers(r) {
+  return [...r.voice]
+    .map((id) => ({ id, name: r.users.get(id) }))
+    .filter((member) => member.name);
+}
 
 // Gom nhieu thay doi lai, 0,3 giay moi gui 1 lan cho moi nguoi (do ton bang thong)
 let roomsTimer = null;
@@ -253,7 +258,8 @@ io.on('connection', (socket) => {
       room: roomName,
       history: r.history,
       users: [...r.users.values()],
-      voice: voiceNames(r)
+      voice: voiceNames(r),
+      voiceMembers: voiceMembers(r)
     });
     socket.to(roomName).emit('users', [...r.users.values()]);
     if (SHOW_SYS_MSG && !replaced) socket.to(roomName).emit('sys', username + ' da vao phong');
@@ -297,6 +303,7 @@ io.on('connection', (socket) => {
     r.voice.add(socket.id);
     socket.emit('voice-peers', peers); // nguoi moi se chu dong goi cho tung nguoi
     io.to(currentRoom).emit('voice-users', voiceNames(r));
+    io.to(currentRoom).emit('voice-members', voiceMembers(r));
   });
 
   socket.on('voice-leave', () => leaveVoice());
@@ -323,6 +330,7 @@ io.on('connection', (socket) => {
     if (!r || !r.voice.delete(socket.id)) return;
     io.to(currentRoom).emit('voice-peer-left', socket.id);
     io.to(currentRoom).emit('voice-users', voiceNames(r));
+    io.to(currentRoom).emit('voice-members', voiceMembers(r));
   }
   // =========================================
 
