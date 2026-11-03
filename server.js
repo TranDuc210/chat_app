@@ -245,6 +245,13 @@ const DATA_FILE = 'data.json';
 // salt + hash chi co khi room co mat khau
 const rooms = Object.create(null);
 let dirty = false;
+const DEFAULT_ROOMS = [
+  'chung',
+  'game',
+  'music',
+  'hoc-tap',
+  'tam-su'
+];
 const cidOf = new Map(); // socket.id -> ma nhan dang cua tab trinh duyet
 
 // ---- Mat khau: chi luu ban bam (hash), khong luu chu that ----
@@ -334,7 +341,20 @@ function getRoom(name, pass) {
   }
   return rooms[name];
 }
+function ensureDefaultRooms() {
+  for (const name of DEFAULT_ROOMS) {
+    if (!rooms[name]) {
+      rooms[name] = {
+        history: [],
+        users: new Map(),
+        voice: new Set(),
+        emptySince: null
+      };
 
+      dirty = true;
+    }
+  }
+}
 // Danh sach phong gui cho client: [[ten, co khoa (0/1), [ten nguoi...], tong so nguoi], ...]
 // Phong co khoa thi KHONG gui ten nguoi ben trong (rieng tu)
 function roomList() {
@@ -373,20 +393,41 @@ function clean(text, max) {
 getRoom('chung'); // room mac dinh, khong mat khau
 
 // ---- Tu dong xoa phong trong qua lau (tru phong 'chung') ----
-setInterval(() => {
+// ---- Tu dong xoa phong trong qua lau (tru phong 'chung') ----
+// ---- Tu dong xoa phong trong qua lau (tru phong 'chung') ----
+setInterval(async () => {
   const now = Date.now();
-  let removed = false;
+  const removedRooms = [];
+
   for (const name in rooms) {
-    if (name === 'chung') continue;
+    if (DEFAULT_ROOMS.includes(name)) continue;
+
     const r = rooms[name];
-    if (r.users.size === 0 && r.emptySince && now - r.emptySince > ROOM_TTL_MS) {
+
+    if (
+      r.users.size === 0 &&
+      r.emptySince &&
+      now - r.emptySince > ROOM_TTL_MS
+    ) {
       delete rooms[name];
-      removed = true;
+      removedRooms.push(name);
     }
   }
-  if (removed) {
+
+  if (removedRooms.length > 0) {
     dirty = true;
     scheduleRooms();
+
+    try {
+      await db.query(
+        'DELETE FROM chat_rooms WHERE room_name = ANY($1)',
+        [removedRooms]
+      );
+
+      console.log('Đã xóa phòng hết hạn khỏi Neon:', removedRooms);
+    } catch (err) {
+      console.error('Lỗi xóa phòng hết hạn khỏi Neon:', err);
+    }
   }
 }, SWEEP_MS);
 
@@ -635,9 +676,16 @@ const PORT = process.env.PORT || 3000;
   try {
     await loadRoomsFromDB();
 
-    server.listen(PORT, () => {
-      console.log('Server chay tai http://localhost:' + PORT);
-    });
+// Tạo các phòng mặc định nếu chưa có
+ensureDefaultRooms();
+
+// Lưu các phòng mặc định mới vào Neon
+if (dirty) {
+  await saveNow();
+}
+server.listen(PORT, () => {
+  console.log('Server chay tai http://localhost:' + PORT);
+});
   } catch (err) {
     console.error('Server không thể khởi động:', err);
     process.exit(1);
