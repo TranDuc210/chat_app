@@ -54,7 +54,7 @@ if (!cid) {
   cid = Math.random().toString(36).slice(2) + Date.now().toString(36);
   sessionStorage.setItem('cid', cid);
 }
-
+const activeCidByUser = new Map();
 // ===== Icon dai dien: vong tron mau + chu cai dau (tinh ngay tren may, khong ton bang thong) =====
 function colorOf(name) {
   let h = 0;
@@ -129,10 +129,12 @@ $('loginForm').addEventListener('submit', async (e) => {
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        login: loginInput,
-        password
-      })
+     body: JSON.stringify({
+  username,
+  email,
+  password,
+  cid
+})
     });
 
     const data = await res.json();

@@ -40,6 +40,77 @@ const sessionMiddleware = session({
 });
 
 app.use(sessionMiddleware);
+async function initLoginLockTable() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS account_login_locks (
+      user_id BIGINT PRIMARY KEY,
+      session_id TEXT NOT NULL UNIQUE,
+      client_id TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  await db.query(`
+    ALTER TABLE account_login_locks
+    ADD COLUMN IF NOT EXISTS client_id TEXT
+  `);
+}
+
+async function acquireLoginLock(userId, sessionId, clientId) {
+  const client = await db.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    await client.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1))',
+      [String(userId)]
+    );
+
+    const old = await client.query(`
+      SELECT l.session_id
+      FROM account_login_locks l
+      JOIN user_sessions s ON s.sid = l.session_id
+      WHERE l.user_id = $1
+        AND s.expire > NOW()
+    `, [userId]);
+
+    if (old.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+
+    await client.query(
+      'DELETE FROM account_login_locks WHERE user_id = $1',
+      [userId]
+    );
+
+    await client.query(`
+      INSERT INTO account_login_locks
+        (user_id, session_id, client_id)
+      VALUES ($1, $2, $3)
+    `, [userId, sessionId, clientId]);
+
+    await client.query('COMMIT');
+    return true;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+async function hasLoginLock(userId, sessionId) {
+  const result = await db.query(
+    `SELECT 1
+     FROM account_login_locks
+     WHERE user_id = $1
+       AND session_id = $2`,
+    [userId, sessionId]
+  );
+
+  return result.rows.length > 0;
+}
 // Tiet kiem bang thong: chi dung websocket, bat nen du lieu
 // maxHttpBufferSize = 20000: du cho cac goi "thuong luong" voice (SDP) di qua server
 const io = new Server(server, {
@@ -50,24 +121,43 @@ const io = new Server(server, {
 
 // Cho Socket.IO truy cập session đăng nhập
 io.engine.use(sessionMiddleware);
-io.use((socket, next) => {
-  const session = socket.request.session;
 
-  if (!session || !session.userId) {
-    return next(new Error('Chưa đăng nhập.'));
+io.use(async (socket, next) => {
+  try {
+    const session = socket.request.session;
+    const sessionId = socket.request.sessionID;
+
+    if (!session || !session.userId || !sessionId) {
+      return next(new Error('Chưa đăng nhập.'));
+    }
+
+    const allowed = await hasLoginLock(
+      session.userId,
+      sessionId
+    );
+
+    if (!allowed) {
+      return next(new Error('Phiên đăng nhập không còn hợp lệ.'));
+    }
+
+    next();
+  } catch (err) {
+    console.error('Lỗi kiểm tra phiên Socket.IO:', err);
+    next(new Error('Không thể xác thực phiên đăng nhập.'));
   }
-
-  next();
 });
+
 // ===== API TAI KHOAN =====
 
 // Dang ky
 // Dang ky
+
 app.post('/api/register', async (req, res) => {
   try {
     const username = String(req.body.username || '').trim();
     const email = String(req.body.email || '').trim().toLowerCase();
     const password = String(req.body.password || '');
+    const clientId = clean(req.body.cid, 40);
 
     if (username.length < 3 || username.length > 20) {
       return res.status(400).json({
@@ -104,23 +194,60 @@ app.post('/api/register', async (req, res) => {
 
     const userId = result.rows[0].id;
 
-    req.session.userId = userId;
+    req.session.regenerate(async (err) => {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({
+          error: 'Không thể tạo phiên đăng ký.'
+        });
+      }
 
-    req.session.save((err) => {
-  if (err) {
-    console.error('Lỗi lưu phiên đăng ký:', err);
-    return res.status(500).json({ error: 'Không thể lưu phiên đăng ký.' });
-  }
+      req.session.userId = userId;
 
-  res.json({
-    message: 'Đăng ký thành công!',
-    user: {
-      id: userId,
-      username,
-      email
-    }
-  });
-});
+      req.session.save(async (saveErr) => {
+        if (saveErr) {
+          console.error(saveErr);
+          return res.status(500).json({
+            error: 'Không thể lưu phiên đăng ký.'
+          });
+        }
+
+        try {
+          const allowed = await acquireLoginLock(
+            userId,
+            req.sessionID,
+            clientId || null
+          );
+
+          if (!allowed) {
+            return req.session.destroy(() => {
+              res.clearCookie('connect.sid');
+              res.status(409).json({
+                error: 'Tài khoản đang có phiên đăng nhập khác.'
+              });
+            });
+          }
+
+          res.json({
+            message: 'Đăng ký thành công!',
+            user: {
+              id: userId,
+              username,
+              email
+            }
+          });
+        } catch (lockErr) {
+          console.error('Lỗi khóa đăng ký:', lockErr);
+
+          req.session.destroy(() => {
+            res.clearCookie('connect.sid');
+            res.status(500).json({
+              error: 'Không thể tạo khóa đăng nhập.'
+            });
+          });
+        }
+      });
+    });
   } catch (err) {
     if (err.code === '23505') {
       return res.status(409).json({
@@ -132,6 +259,7 @@ app.post('/api/register', async (req, res) => {
     res.status(500).json({ error: 'Lỗi server.' });
   }
 });
+
 
 // Dang nhap
 app.post('/api/login', async (req, res) => {
@@ -182,7 +310,16 @@ app.get('/api/me', async (req, res) => {
   if (!req.session.userId) {
     return res.status(401).json({ error: 'Chưa đăng nhập.' });
   }
+const allowed = await hasLoginLock(
+  req.session.userId,
+  req.sessionID
+);
 
+if (!allowed) {
+  return res.status(401).json({
+    error: 'Phiên đăng nhập không còn hợp lệ. Vui lòng đăng nhập lại.'
+  });
+}
   const result = await db.query(`
   SELECT id, username, email
   FROM users
@@ -200,23 +337,42 @@ const user = result.rows[0];
 
 // Dang xuat
 
-app.post('/api/logout', (req, res) => {
-  if (!req.session) {
+
+app.post('/api/logout', async (req, res) => {
+  if (!req.session || !req.session.userId) {
     return res.json({ message: 'Đã đăng xuất.' });
   }
 
-  req.session.destroy((err) => {
-    if (err) {
-      console.error('Lỗi đăng xuất:', err);
-      return res.status(500).json({
-        error: 'Không thể đăng xuất.'
-      });
-    }
+  const userId = req.session.userId;
+  const sessionId = req.sessionID;
 
-    res.clearCookie('connect.sid');
-    res.json({ message: 'Đã đăng xuất.' });
-  });
+  try {
+    // Chỉ xóa khóa nếu đúng tài khoản và đúng phiên hiện tại
+    await db.query(
+      `DELETE FROM account_login_locks
+       WHERE user_id = $1 AND session_id = $2`,
+      [userId, sessionId]
+    );
+
+    req.session.destroy((err) => {
+      if (err) {
+        console.error('Lỗi đăng xuất:', err);
+        return res.status(500).json({
+          error: 'Không thể đăng xuất.'
+        });
+      }
+
+      res.clearCookie('connect.sid');
+      res.json({ message: 'Đã đăng xuất.' });
+    });
+  } catch (err) {
+    console.error('Lỗi giải phóng khóa đăng nhập:', err);
+    res.status(500).json({
+      error: 'Không thể giải phóng phiên đăng nhập.'
+    });
+  }
 });
+
 
 
 app.use(express.static('public'));
@@ -252,7 +408,7 @@ const DEFAULT_ROOMS = [
   'hoc-tap',
   'tam-su'
 ];
-const cidOf = new Map(); // socket.id -> ma nhan dang cua tab trinh duyet
+const activeCidByUser = new Map(); // userId -> cid dang hoat dong
 
 // ---- Mat khau: chi luu ban bam (hash), khong luu chu that ----
 function hashPass(pass, salt) {
@@ -433,7 +589,25 @@ setInterval(async () => {
 
 io.on('connection', (socket) => {
   const userId = socket.request.session.userId;
+  socket.use(async (event, next) => {
+  try {
+    const allowed = await hasLoginLock(
+      userId,
+      socket.request.sessionID
+    );
 
+    if (!allowed) {
+      socket.emit('retry-login');
+      socket.disconnect(true);
+      return;
+    }
+
+    next();
+  } catch (err) {
+    console.error('Lỗi kiểm tra quyền Socket:', err);
+    next(new Error('Không thể xác thực phiên.'));
+  }
+});
   let currentRoom = null; // Phòng đang tham gia, dùng cho danh sách thành viên
   let viewedRoom = null;  // Phòng đang xem tin nhắn
   let voiceRoom = null;   // Phòng đang tham gia voice
@@ -476,7 +650,53 @@ io.on('connection', (socket) => {
   }
 
   const myCid = clean(cid, 40);
-  cidOf.set(socket.id, myCid);
+if (!myCid) {
+  return reject('Không xác định được tab. Vui lòng tải lại trang.');
+}
+
+const key = String(userId);
+
+if (activeCidByUser.get(key) && activeCidByUser.get(key) !== myCid) {
+  for (const [id, oldCid] of cidOf) {
+    const oldSocket = io.sockets.sockets.get(id);
+
+    if (
+      oldSocket &&
+      String(oldSocket.request.session.userId) === key &&
+      oldCid === activeCidByUser.get(key)
+    ) {
+      oldSocket.emit('retry-login');
+      oldSocket.disconnect(true);
+    }
+  }
+}
+
+activeCidByUser.set(key, myCid);
+cidOf.set(socket.id, myCid);
+if (!myCid) {
+  return reject('Không xác định được tab trình duyệt. Vui lòng tải lại trang.');
+}
+
+const activeCid = activeCidByUser.get(String(userId));
+
+if (activeCidByUser.get(key) && activeCidByUser.get(key) !== myCid) {
+  // Tab mới thay thế tab cũ của cùng tài khoản
+  for (const [id, oldCid] of cidOf) {
+    const oldSocket = io.sockets.sockets.get(id);
+
+    if (
+      oldSocket &&
+      String(oldSocket.request.session.userId) === String(userId) &&
+      oldCid === activeCidByUser.get(key)
+    ) {
+      oldSocket.emit('retry-login');
+      oldSocket.disconnect(true);
+    }
+  }
+}
+
+activeCidByUser.set(String(userId), myCid);
+cidOf.set(socket.id, myCid);
 
   const roomName = clean(room, 20).toLowerCase() || 'chung';
   const passText = clean(pass, 50);
@@ -776,9 +996,10 @@ if (SHOW_SYS_MSG && !silent) {
 }
 
   socket.on('disconnect', () => {
-    cidOf.delete(socket.id);
-    if (currentRoom) leave(!!socket.data.silent);
-  });
+  cidOf.delete(socket.id);
+
+  if (currentRoom) leave(!!socket.data.silent);
+});
 });
 async function loadRoomsFromDB() {
   try {
@@ -807,6 +1028,7 @@ const PORT = process.env.PORT || 3000;
 
 (async () => {
   try {
+      await initLoginLockTable();
     await loadRoomsFromDB();
 
 // Tạo các phòng mặc định nếu chưa có
