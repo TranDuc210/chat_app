@@ -1,6 +1,5 @@
 const express = require('express');
 const http = require('http');
-const fs = require('fs');
 const crypto = require('crypto');
 const { Server } = require('socket.io');
 const session = require('express-session');
@@ -9,6 +8,12 @@ const db = require('./database');
 const PgSession = require('connect-pg-simple')(session);
 const app = express();
 const server = http.createServer(app);
+
+// Một lời hứa (async) bị lỗi mà không ai bắt thì Node tắt luôn server.
+// Ghi lại lỗi và chạy tiếp cho an toàn.
+process.on('unhandledRejection', (err) => {
+  console.error('Lỗi chưa được xử lý (unhandledRejection):', err);
+});
 
 // ===== AUTHENTICATION =====
 app.use(express.json());
@@ -19,6 +24,9 @@ if (!process.env.SESSION_SECRET) {
 
 // Render chạy sau HTTPS proxy
 app.set('trust proxy', 1);
+
+// File tĩnh (html/css/js) đặt TRƯỚC session: tải trang không cần hỏi database
+app.use(express.static('public'));
 
 const sessionMiddleware = session({
   store: new PgSession({
@@ -34,27 +42,15 @@ const sessionMiddleware = session({
   cookie: {
     httpOnly: true,
     sameSite: 'lax',
-    secure: true,
+    // 'auto' = có HTTPS (Render) thì cookie "secure", chạy http://localhost thì vẫn đăng nhập được
+    secure: 'auto',
     maxAge: 7 * 24 * 60 * 60 * 1000
   }
 });
 
 app.use(sessionMiddleware);
-async function initLoginLockTable() {
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS account_login_locks (
-      user_id BIGINT PRIMARY KEY,
-      session_id TEXT NOT NULL UNIQUE,
-      client_id TEXT,
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    )
-  `);
 
-  await db.query(`
-    ALTER TABLE account_login_locks
-    ADD COLUMN IF NOT EXISTS client_id TEXT
-  `);
-}
+// ===== KHÓA ĐĂNG NHẬP: mỗi tài khoản chỉ có 1 phiên; đăng nhập mới ĐÁ phiên cũ =====
 
 async function acquireLoginLock(userId, sessionId, clientId) {
   const client = await db.connect();
@@ -62,23 +58,20 @@ async function acquireLoginLock(userId, sessionId, clientId) {
   try {
     await client.query('BEGIN');
 
+    // Hai lần đăng nhập cùng lúc của một tài khoản phải xếp hàng
     await client.query(
       'SELECT pg_advisory_xact_lock(hashtext($1))',
       [String(userId)]
     );
 
-    const old = await client.query(`
-      SELECT l.session_id
-      FROM account_login_locks l
-      JOIN user_sessions s ON s.sid = l.session_id
-      WHERE l.user_id = $1
-        AND s.expire > NOW()
-    `, [userId]);
-
-    if (old.rows.length > 0) {
-      await client.query('ROLLBACK');
-      return false;
-    }
+    // Xóa phiên cũ khỏi bảng session -> trình duyệt cũ hết quyền ngay
+    await client.query(`
+      DELETE FROM user_sessions
+      WHERE sid IN (
+        SELECT session_id FROM account_login_locks
+        WHERE user_id = $1 AND session_id <> $2
+      )
+    `, [userId, sessionId]);
 
     await client.query(
       'DELETE FROM account_login_locks WHERE user_id = $1',
@@ -86,32 +79,78 @@ async function acquireLoginLock(userId, sessionId, clientId) {
     );
 
     await client.query(`
-      INSERT INTO account_login_locks
-        (user_id, session_id, client_id)
+      INSERT INTO account_login_locks (user_id, session_id, client_id)
       VALUES ($1, $2, $3)
     `, [userId, sessionId, clientId]);
 
     await client.query('COMMIT');
-    return true;
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {});
     throw err;
   } finally {
     client.release();
   }
 }
-async function hasLoginLock(userId, sessionId, clientId) {
+
+// Trả về username nếu (tài khoản + phiên + tab) khớp khóa đang giữ, ngược lại trả null
+async function findLockedUsername(userId, sessionId, clientId) {
   const result = await db.query(
-    `SELECT 1
-     FROM account_login_locks
-     WHERE user_id = $1
-       AND session_id = $2
-       AND client_id = $3`,
+    `SELECT u.username
+     FROM account_login_locks l
+     JOIN users u ON u.id = l.user_id
+     WHERE l.user_id = $1
+       AND l.session_id = $2
+       AND l.client_id = $3`,
     [userId, sessionId, clientId]
   );
 
-  return result.rows.length > 0;
+  return result.rows.length > 0 ? result.rows[0].username : null;
 }
+
+// ===== DANH SÁCH SOCKET ĐANG KẾT NỐI THEO TÀI KHOẢN =====
+const socketsByUser = new Map(); // userId -> Set<socket>
+
+function trackSocket(socket) {
+  const key = String(socket.data.userId);
+
+  // Cùng tab mở kết nối mới (vd bấm F5): đóng kết nối cũ, không thông báo
+  for (const old of [...(socketsByUser.get(key) || [])]) {
+    old.data.silent = true;
+    old.disconnect(true);
+  }
+
+  // Lấy lại Set SAU khi đóng kết nối cũ: lúc đó untrackSocket có thể đã xóa Set rỗng khỏi Map
+  let set = socketsByUser.get(key);
+  if (!set) {
+    set = new Set();
+    socketsByUser.set(key, set);
+  }
+  set.add(socket);
+}
+
+function untrackSocket(socket) {
+  const key = String(socket.data.userId);
+  const set = socketsByUser.get(key);
+  if (!set) return;
+  set.delete(socket);
+  if (set.size === 0) socketsByUser.delete(key);
+}
+
+// Ngắt các kết nối của một tài khoản.
+// reason: câu thông báo hiện ở màn hình đăng nhập (null = chỉ báo "đăng nhập lại").
+// keep(socket) = true thì giữ lại, không ngắt.
+function kickUserSockets(userId, reason, keep) {
+  const set = socketsByUser.get(String(userId));
+  if (!set) return;
+
+  for (const s of [...set]) {
+    if (keep && keep(s)) continue;
+    if (reason) s.emit('kicked', reason);
+    else s.emit('retry-login');
+    s.disconnect(true);
+  }
+}
+
 // Tiet kiem bang thong: chi dung websocket, bat nen du lieu
 // maxHttpBufferSize = 20000: du cho cac goi "thuong luong" voice (SDP) di qua server
 const io = new Server(server, {
@@ -123,26 +162,31 @@ const io = new Server(server, {
 // Cho Socket.IO truy cập session đăng nhập
 io.engine.use(sessionMiddleware);
 
+// Kiểm tra đăng nhập ĐÚNG 1 LẦN lúc bắt tay. Sau đó, nếu có người đăng nhập
+// chỗ khác thì server chủ động ngắt (kickUserSockets), không cần kiểm tra mỗi tin nhắn.
 io.use(async (socket, next) => {
   try {
-    const session = socket.request.session;
+    const sess = socket.request.session;
     const sessionId = socket.request.sessionID;
 
-    if (!session || !session.userId || !sessionId) {
+    if (!sess || !sess.userId || !sessionId) {
       return next(new Error('Chưa đăng nhập.'));
     }
 
-  const clientId = clean(socket.handshake.auth?.cid, 40);
+    const clientId = clean(socket.handshake.auth && socket.handshake.auth.cid, 40);
+    if (!clientId) {
+      return next(new Error('Không xác định được tab. Vui lòng tải lại trang.'));
+    }
 
-const allowed = await hasLoginLock(
-  session.userId,
-  sessionId,
-  clientId
-);
-
-    if (!allowed) {
+    const username = await findLockedUsername(sess.userId, sessionId, clientId);
+    if (!username) {
       return next(new Error('Phiên đăng nhập không còn hợp lệ.'));
     }
+
+    socket.data.userId = String(sess.userId);
+    socket.data.sid = sessionId;
+    socket.data.cid = clientId;
+    socket.data.username = username;
 
     next();
   } catch (err) {
@@ -153,20 +197,60 @@ const allowed = await hasLoginLock(
 
 // ===== API TAI KHOAN =====
 
-// Dang ky
-// Dang ky
+const promisifySession = {
+  regenerate: (req) => new Promise((resolve, reject) =>
+    req.session.regenerate((e) => (e ? reject(e) : resolve()))),
+  save: (req) => new Promise((resolve, reject) =>
+    req.session.save((e) => (e ? reject(e) : resolve()))),
+  destroy: (req) => new Promise((resolve) =>
+    req.session.destroy(() => resolve()))
+};
 
+// Tạo phiên đăng nhập mới cho userId và ĐÁ mọi phiên cũ của tài khoản này
+async function startSession(req, userId, clientId) {
+  const previousUserId = req.session && req.session.userId;
+  const previousSid = req.sessionID;
+
+  await promisifySession.regenerate(req);
+  req.session.userId = userId;
+  await promisifySession.save(req);
+
+  const newSid = req.sessionID;
+
+  await acquireLoginLock(userId, newSid, clientId);
+
+  // Đá các kết nối cũ của tài khoản này (ở tab/thiết bị khác, hoặc cùng tab đăng nhập lại)
+  kickUserSockets(
+    userId,
+    'Tài khoản vừa được đăng nhập ở nơi khác.',
+    (s) => s.data.sid === newSid
+  );
+
+  // Trình duyệt này đang đăng nhập tài khoản KHÁC rồi chuyển sang tài khoản mới
+  if (previousUserId && String(previousUserId) !== String(userId)) {
+    await db.query(
+      'DELETE FROM account_login_locks WHERE user_id = $1 AND session_id = $2',
+      [previousUserId, previousSid]
+    );
+    kickUserSockets(previousUserId, null, (s) => s.data.sid !== previousSid);
+  }
+}
+
+// Dang ky
 app.post('/api/register', async (req, res) => {
   try {
-    const username = String(req.body.username || '').trim();
-    const email = String(req.body.email || '').trim().toLowerCase();
-    const password = String(req.body.password || '');
-    const clientId = clean(req.body.cid, 40);
+    const body = req.body || {};
+    const username = String(body.username || '').trim();
+    const email = String(body.email || '').trim().toLowerCase();
+    const password = String(body.password || '');
+    const clientId = clean(body.cid, 40);
+
     if (!clientId) {
-  return res.status(400).json({
-    error: 'Không xác định được tab. Vui lòng tải lại trang.'
-  });
-}
+      return res.status(400).json({
+        error: 'Không xác định được tab. Vui lòng tải lại trang.'
+      });
+    }
+
     if (username.length < 3 || username.length > 20) {
       return res.status(400).json({
         error: 'Tên tài khoản phải từ 3 đến 20 ký tự.'
@@ -202,59 +286,18 @@ app.post('/api/register', async (req, res) => {
 
     const userId = result.rows[0].id;
 
-    req.session.regenerate(async (err) => {
-      if (err) {
-        console.error(err);
-        return res.status(500).json({
-          error: 'Không thể tạo phiên đăng ký.'
-        });
-      }
+    try {
+      await startSession(req, userId, clientId);
+    } catch (sessErr) {
+      console.error('Lỗi tạo phiên đăng ký:', sessErr);
+      await promisifySession.destroy(req);
+      res.clearCookie('connect.sid');
+      return res.status(500).json({ error: 'Không thể tạo phiên đăng nhập.' });
+    }
 
-      req.session.userId = userId;
-
-      req.session.save(async (saveErr) => {
-        if (saveErr) {
-          console.error(saveErr);
-          return res.status(500).json({
-            error: 'Không thể lưu phiên đăng ký.'
-          });
-        }
-
-        try {
-          const allowed = await acquireLoginLock(
-            userId,
-            req.sessionID,
-            clientId || null
-          );
-
-          if (!allowed) {
-            return req.session.destroy(() => {
-              res.clearCookie('connect.sid');
-              res.status(409).json({
-                error: 'Tài khoản đang có phiên đăng nhập khác.'
-              });
-            });
-          }
-
-          res.json({
-            message: 'Đăng ký thành công!',
-            user: {
-              id: userId,
-              username,
-              email
-            }
-          });
-        } catch (lockErr) {
-          console.error('Lỗi khóa đăng ký:', lockErr);
-
-          req.session.destroy(() => {
-            res.clearCookie('connect.sid');
-            res.status(500).json({
-              error: 'Không thể tạo khóa đăng nhập.'
-            });
-          });
-        }
-      });
+    res.json({
+      message: 'Đăng ký thành công!',
+      user: { id: userId, username, email }
     });
   } catch (err) {
     if (err.code === '23505') {
@@ -263,18 +306,18 @@ app.post('/api/register', async (req, res) => {
       });
     }
 
-    console.error(err);
+    console.error('Lỗi API đăng ký:', err);
     res.status(500).json({ error: 'Lỗi server.' });
   }
 });
 
-
-// Dang nhap
+// Dang nhap: dang nhap moi se DA phien cu
 app.post('/api/login', async (req, res) => {
   try {
-    const login = String(req.body.login || '').trim();
-    const password = String(req.body.password || '');
-    const clientId = clean(req.body.cid, 40);
+    const body = req.body || {};
+    const login = String(body.login || '').trim();
+    const password = String(body.password || '');
+    const clientId = clean(body.cid, 40);
 
     if (!clientId) {
       return res.status(400).json({
@@ -296,74 +339,22 @@ app.post('/api/login', async (req, res) => {
       });
     }
 
-    // Nếu tài khoản đang có phiên hoạt động, từ chối trước khi đổi session.
-    const active = await db.query(
-      `SELECT 1
-       FROM account_login_locks l
-       JOIN user_sessions s ON s.sid = l.session_id
-       WHERE l.user_id = $1 AND s.expire > NOW()`,
-      [user.id]
-    );
-
-    if (active.rows.length > 0) {
-      return res.status(409).json({
-        error: 'Tài khoản đang đăng nhập trên thiết bị hoặc tab khác. Hãy đăng xuất ở đó trước.'
-      });
+    try {
+      await startSession(req, user.id, clientId);
+    } catch (sessErr) {
+      console.error('Lỗi tạo phiên đăng nhập:', sessErr);
+      await promisifySession.destroy(req);
+      res.clearCookie('connect.sid');
+      return res.status(500).json({ error: 'Không thể tạo phiên đăng nhập.' });
     }
 
-    req.session.regenerate((err) => {
-      if (err) {
-        console.error('Lỗi tạo session đăng nhập:', err);
-        return res.status(500).json({
-          error: 'Không thể tạo phiên đăng nhập.'
-        });
+    res.json({
+      message: 'Đăng nhập thành công!',
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email
       }
-
-      req.session.userId = user.id;
-
-      req.session.save(async (saveErr) => {
-        if (saveErr) {
-          console.error('Lỗi lưu session đăng nhập:', saveErr);
-          return res.status(500).json({
-            error: 'Không thể lưu phiên đăng nhập.'
-          });
-        }
-
-        try {
-          const allowed = await acquireLoginLock(
-            user.id,
-            req.sessionID,
-            clientId
-          );
-
-          if (!allowed) {
-            return req.session.destroy(() => {
-              res.clearCookie('connect.sid');
-              res.status(409).json({
-                error: 'Tài khoản đang đăng nhập trên thiết bị hoặc tab khác.'
-              });
-            });
-          }
-
-          res.json({
-            message: 'Đăng nhập thành công!',
-            user: {
-              id: user.id,
-              username: user.username,
-              email: user.email
-            }
-          });
-        } catch (lockErr) {
-          console.error('Lỗi tạo khóa đăng nhập:', lockErr);
-
-          req.session.destroy(() => {
-            res.clearCookie('connect.sid');
-            res.status(500).json({
-              error: 'Không thể kiểm tra phiên đăng nhập.'
-            });
-          });
-        }
-      });
     });
   } catch (err) {
     console.error('Lỗi API đăng nhập:', err);
@@ -373,40 +364,43 @@ app.post('/api/login', async (req, res) => {
 
 // Kiem tra tai khoan dang dang nhap
 app.get('/api/me', async (req, res) => {
-  if (!req.session.userId) {
-    return res.status(401).json({ error: 'Chưa đăng nhập.' });
+  try {
+    if (!req.session.userId) {
+      return res.status(401).json({ error: 'Chưa đăng nhập.' });
+    }
+
+    const clientId = clean(req.get('X-Client-ID'), 40);
+    const username = await findLockedUsername(
+      req.session.userId,
+      req.sessionID,
+      clientId
+    );
+
+    if (!username) {
+      return res.status(401).json({
+        error: 'Phiên đăng nhập không còn hợp lệ. Vui lòng đăng nhập lại.'
+      });
+    }
+
+    const result = await db.query(
+      'SELECT id, username, email FROM users WHERE id = $1',
+      [req.session.userId]
+    );
+
+    const user = result.rows[0];
+
+    if (!user) {
+      return res.status(401).json({ error: 'Tài khoản không tồn tại.' });
+    }
+
+    res.json({ user });
+  } catch (err) {
+    console.error('Lỗi API /api/me:', err);
+    res.status(500).json({ error: 'Lỗi server.' });
   }
-const clientId = clean(req.get('X-Client-ID'), 40);
-
-const allowed = await hasLoginLock(
-  req.session.userId,
-  req.sessionID,
-  clientId
-);
-
-if (!allowed) {
-  return res.status(401).json({
-    error: 'Phiên đăng nhập không còn hợp lệ. Vui lòng đăng nhập lại.'
-  });
-}
-  const result = await db.query(`
-  SELECT id, username, email
-  FROM users
-  WHERE id = $1
-`, [req.session.userId]);
-
-const user = result.rows[0];
-
-  if (!user) {
-    return res.status(401).json({ error: 'Tài khoản không tồn tại.' });
-  }
-
-  res.json({ user });
 });
 
 // Dang xuat
-
-
 app.post('/api/logout', async (req, res) => {
   if (!req.session || !req.session.userId) {
     return res.json({ message: 'Đã đăng xuất.' });
@@ -423,28 +417,17 @@ app.post('/api/logout', async (req, res) => {
       [userId, sessionId]
     );
 
-    req.session.destroy((err) => {
-      if (err) {
-        console.error('Lỗi đăng xuất:', err);
-        return res.status(500).json({
-          error: 'Không thể đăng xuất.'
-        });
-      }
+    // Ngắt các kết nối socket của phiên này
+    kickUserSockets(userId, null, (s) => s.data.sid !== sessionId);
 
-      res.clearCookie('connect.sid');
-      res.json({ message: 'Đã đăng xuất.' });
-    });
+    await promisifySession.destroy(req);
+    res.clearCookie('connect.sid');
+    res.json({ message: 'Đã đăng xuất.' });
   } catch (err) {
-    console.error('Lỗi giải phóng khóa đăng nhập:', err);
-    res.status(500).json({
-      error: 'Không thể giải phóng phiên đăng nhập.'
-    });
+    console.error('Lỗi đăng xuất:', err);
+    res.status(500).json({ error: 'Không thể đăng xuất.' });
   }
 });
-
-
-
-app.use(express.static('public'));
 
 // ====== CAC GIOI HAN (muon doi thi sua o day) ======
 const SHOW_SYS_MSG = false;             // true = hien dong "X da vao/roi phong" trong khung chat
@@ -463,13 +446,12 @@ const JOIN_LIMIT = 6;                   // moi nguoi doi phong toi da 6 lan...
 const JOIN_WINDOW_MS = 10 * 1000;       // ...trong 10 giay
 const ROOM_TTL_MS = 6 * 60 * 60 * 1000; // phong trong 6 gio se bi xoa
 const SWEEP_MS = 10 * 60 * 1000;        // 10 phut quet phong trong 1 lan
+const SAVE_MS = 5000;                   // 5 giay luu cac phong da thay doi 1 lan
 const ROOM_NAME_RE = /^[\p{L}\p{N}_-]+$/u; // chu cai, so, gach ngang, gach duoi
-const DATA_FILE = 'data.json';
 
 // rooms = { tenRoom: { history: [], users: Map, voice: Set, salt, hash, emptySince } }
 // salt + hash chi co khi room co mat khau
 const rooms = Object.create(null);
-let dirty = false;
 const DEFAULT_ROOMS = [
   'chung',
   'game',
@@ -477,8 +459,7 @@ const DEFAULT_ROOMS = [
   'hoc-tap',
   'tam-su'
 ];
-const activeCidByUser = new Map(); // userId -> cid dang hoat dong
-const cidOf = new Map(); // socket.id -> cid
+
 // ---- Mat khau: chi luu ban bam (hash), khong luu chu that ----
 function hashPass(pass, salt) {
   return crypto.scryptSync(pass, salt, 32).toString('hex');
@@ -494,78 +475,94 @@ function checkPass(room, pass) {
   return crypto.timingSafeEqual(a, b);
 }
 
-// ---- Doc du lieu cu tu file khi bat server ----
-try {
-  const saved = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  for (const name in saved) {
-    const s = saved[name];
-    if (Array.isArray(s)) {
-      // dinh dang cu (chi co lich su)
-      rooms[name] = { history: s, users: new Map(), voice: new Set(), emptySince: Date.now() };
-    } else {
-      rooms[name] = {
-        history: s.history || [], salt: s.salt, hash: s.hash,
-        users: new Map(), voice: new Set(), emptySince: Date.now()
-      };
-    }
-  }
-} catch (e) {
-  // chua co file -> bo qua
+// ---- Luu phong vao Neon: chi luu nhung phong DA THAY DOI ----
+const dirtyRooms = new Set();
+function markDirty(name) {
+  dirtyRooms.add(name);
 }
 
-// ---- Luu du lieu ra file ----
-async function saveNow() {
-  try {
-    for (const name in rooms) {
+// Moi viec ghi database xep hang noi duoi nhau (khong bao gio chay chong cheo)
+let dbQueue = Promise.resolve();
+function enqueue(task) {
+  dbQueue = dbQueue.then(task).catch((err) => {
+    console.error('Lỗi database:', err);
+  });
+  return dbQueue;
+}
+
+function saveNow() {
+  return enqueue(async () => {
+    if (dirtyRooms.size === 0) return;
+
+    const names = [...dirtyRooms];
+    dirtyRooms.clear();
+
+    for (const name of names) {
       const r = rooms[name];
+      if (!r) continue; // phong da bi xoa
 
-      await db.query(
-        `INSERT INTO chat_rooms (room_name, history, salt, password_hash)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (room_name)
-         DO UPDATE SET
-           history = EXCLUDED.history,
-           salt = EXCLUDED.salt,
-           password_hash = EXCLUDED.password_hash,
-           updated_at = NOW()`,
-        [name, JSON.stringify(r.history), r.salt || null, r.hash || null]
-      );
+      try {
+        await db.query(
+          `INSERT INTO chat_rooms (room_name, history, salt, password_hash)
+           VALUES ($1, $2::jsonb, $3, $4)
+           ON CONFLICT (room_name)
+           DO UPDATE SET
+             history = EXCLUDED.history,
+             salt = EXCLUDED.salt,
+             password_hash = EXCLUDED.password_hash,
+             updated_at = NOW()`,
+          [name, JSON.stringify(r.history), r.salt || null, r.hash || null]
+        );
+      } catch (err) {
+        console.error('Lỗi lưu phòng "' + name + '" vào Neon:', err);
+        dirtyRooms.add(name); // lan sau thu luu lai
+      }
     }
-
-    dirty = false;
-  } catch (err) {
-    console.error('Lỗi lưu phòng chat vào Neon:', err);
-  }
+  });
 }
-let saving = false;
 
-setInterval(async () => {
-  if (!dirty || saving) return;
+setInterval(() => {
+  if (dirtyRooms.size > 0) saveNow();
+}, SAVE_MS);
 
-  saving = true;
+// ---- Tat server dung cach: Render gui SIGTERM, Ctrl+C gui SIGINT ----
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(signal + ': đang lưu dữ liệu rồi tắt server...');
+
+  // Neu ket thuc cham qua 10 giay thi ep tat
+  const force = setTimeout(() => process.exit(1), 10000);
+  force.unref();
+
+  try {
+    io.close();
+  } catch (err) {
+    console.error('Lỗi đóng Socket.IO:', err);
+  }
+
   try {
     await saveNow();
-  } finally {
-    saving = false;
-  }
-}, 5000);
-process.on('SIGINT', async () => {
-  if (dirty) {
-    await saveNow();
+    await db.end();
+  } catch (err) {
+    console.error('Lỗi khi tắt server:', err);
   }
 
-  await db.end();
   process.exit(0);
-});
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 function getRoom(name, pass) {
   if (!rooms[name]) {
     rooms[name] = { history: [], users: new Map(), voice: new Set(), emptySince: null };
     if (pass) Object.assign(rooms[name], makeSecret(pass));
-    dirty = true;
+    markDirty(name);
   }
   return rooms[name];
 }
+
 function ensureDefaultRooms() {
   for (const name of DEFAULT_ROOMS) {
     if (!rooms[name]) {
@@ -576,10 +573,11 @@ function ensureDefaultRooms() {
         emptySince: null
       };
 
-      dirty = true;
+      markDirty(name);
     }
   }
 }
+
 // Danh sach phong gui cho client: [[ten, co khoa (0/1), [ten nguoi...], tong so nguoi], ...]
 // Phong co khoa thi KHONG gui ten nguoi ben trong (rieng tu)
 function roomList() {
@@ -615,12 +613,27 @@ function clean(text, max) {
   return String(text || '').trim().slice(0, max);
 }
 
-getRoom('chung'); // room mac dinh, khong mat khau
+// Du lieu client gui len co the la bat ky thu gi (undefined, so, chuoi...)
+function isObj(x) {
+  return typeof x === 'object' && x !== null;
+}
 
-// ---- Tu dong xoa phong trong qua lau (tru phong 'chung') ----
-// ---- Tu dong xoa phong trong qua lau (tru phong 'chung') ----
-// ---- Tu dong xoa phong trong qua lau (tru phong 'chung') ----
-setInterval(async () => {
+// Boc moi ham xu ly su kien: loi (ke ca loi async) chi duoc ghi lai, khong lam sap server
+function safe(handler) {
+  return (...args) => {
+    try {
+      const out = handler(...args);
+      if (out && typeof out.catch === 'function') {
+        out.catch((err) => console.error('Lỗi xử lý sự kiện socket:', err));
+      }
+    } catch (err) {
+      console.error('Lỗi xử lý sự kiện socket:', err);
+    }
+  };
+}
+
+// ---- Tu dong xoa phong trong qua lau (tru cac phong mac dinh) ----
+setInterval(() => {
   const now = Date.now();
   const removedRooms = [];
 
@@ -635,55 +648,33 @@ setInterval(async () => {
       now - r.emptySince > ROOM_TTL_MS
     ) {
       delete rooms[name];
+      dirtyRooms.delete(name);
       removedRooms.push(name);
     }
   }
 
   if (removedRooms.length > 0) {
-    dirty = true;
     scheduleRooms();
 
-    try {
+    enqueue(async () => {
       await db.query(
         'DELETE FROM chat_rooms WHERE room_name = ANY($1)',
         [removedRooms]
       );
-
       console.log('Đã xóa phòng hết hạn khỏi Neon:', removedRooms);
-    } catch (err) {
-      console.error('Lỗi xóa phòng hết hạn khỏi Neon:', err);
-    }
+    });
   }
 }, SWEEP_MS);
 
 io.on('connection', (socket) => {
-  const userId = socket.request.session.userId;
-  socket.use(async (event, next) => {
-  try {
-    const clientId = clean(socket.handshake.auth?.cid, 40);
+  const userId = socket.data.userId;
+  const username = socket.data.username;
 
-const allowed = await hasLoginLock(
-  userId,
-  socket.request.sessionID,
-  clientId
-);
+  trackSocket(socket);
 
-    if (!allowed) {
-      socket.emit('retry-login');
-      socket.disconnect(true);
-      return;
-    }
-
-    next();
-  } catch (err) {
-    console.error('Lỗi kiểm tra quyền Socket:', err);
-    next(new Error('Không thể xác thực phiên.'));
-  }
-});
   let currentRoom = null; // Phòng đang tham gia, dùng cho danh sách thành viên
   let viewedRoom = null;  // Phòng đang xem tin nhắn
   let voiceRoom = null;   // Phòng đang tham gia voice
-  let username = '';
   let recent = [];       // chong spam tin nhan
   let failCount = 0;     // so lan sai mat khau
   let createTimes = [];  // thoi diem cac lan tao phong moi
@@ -692,86 +683,17 @@ const allowed = await hasLoginLock(
 
   socket.emit('rooms', roomList());
 
-  // Gui canh bao; neu nguoi nay chua vao phong nao thi dua ve man hinh dang nhap
+  // Vao phong that bai: bao cho nguoi dung. Client tu quyet dinh lam gi tiep (xem 'join-failed')
   function reject(text) {
     socket.emit('warn', text);
-    if (!currentRoom) socket.emit('retry-login');
+    socket.emit('join-failed');
   }
 
-    socket.on('join', async ({ room, pass, cid }) => {
-  let replaced = false;
-  let newName;
-
-  try {
-    const result = await db.query(
-      'SELECT username FROM users WHERE id = $1',
-      [userId]
-    );
-
-    if (result.rows.length === 0) {
-      socket.emit('retry-login');
-      socket.disconnect(true);
-      return;
-    }
-
-    newName = result.rows[0].username;
-  } catch (err) {
-    console.error('Lỗi xác thực tài khoản Socket:', err);
-    socket.emit('warn', 'Không thể xác thực tài khoản. Vui lòng thử lại.');
-    return;
-  }
-
-  const myCid = clean(cid, 40);
-if (!myCid) {
-  return reject('Không xác định được tab. Vui lòng tải lại trang.');
-}
-
-const key = String(userId);
-
-if (activeCidByUser.get(key) && activeCidByUser.get(key) !== myCid) {
-  for (const [id, oldCid] of cidOf) {
-    const oldSocket = io.sockets.sockets.get(id);
-
-    if (
-      oldSocket &&
-      String(oldSocket.request.session.userId) === key &&
-      oldCid === activeCidByUser.get(key)
-    ) {
-      oldSocket.emit('retry-login');
-      oldSocket.disconnect(true);
-    }
-  }
-}
-
-activeCidByUser.set(key, myCid);
-cidOf.set(socket.id, myCid);
-if (!myCid) {
-  return reject('Không xác định được tab trình duyệt. Vui lòng tải lại trang.');
-}
-
-const activeCid = activeCidByUser.get(String(userId));
-
-if (activeCidByUser.get(key) && activeCidByUser.get(key) !== myCid) {
-  // Tab mới thay thế tab cũ của cùng tài khoản
-  for (const [id, oldCid] of cidOf) {
-    const oldSocket = io.sockets.sockets.get(id);
-
-    if (
-      oldSocket &&
-      String(oldSocket.request.session.userId) === String(userId) &&
-      oldCid === activeCidByUser.get(key)
-    ) {
-      oldSocket.emit('retry-login');
-      oldSocket.disconnect(true);
-    }
-  }
-}
-
-activeCidByUser.set(String(userId), myCid);
-cidOf.set(socket.id, myCid);
-
-  const roomName = clean(room, 20).toLowerCase() || 'chung';
-  const passText = clean(pass, 50);
+  socket.on('join', safe((payload) => {
+    const { room, pass } = isObj(payload) ? payload : {};
+    const roomName = clean(room, 20).toLowerCase() || 'chung';
+    const passText = clean(pass, 50);
+    let replaced = false;
 
     // Gioi han toc do doi phong
     const t0 = Date.now();
@@ -816,18 +738,25 @@ cidOf.set(socket.id, myCid);
       }
       // c. Kiem tra trung ten (bo qua chinh minh)
       for (const [id, n] of [...existing.users]) {
-        if (id !== socket.id && n.toLowerCase() === newName.toLowerCase()) {
-          // Ket noi cu cua CHINH tab nay (vd sau khi bam F5) -> dong no lai, cho vao
-          if (myCid && cidOf.get(id) === myCid) {
-            const old = io.sockets.sockets.get(id);
-            if (old) {
-              old.data.silent = true; // ket noi cu roi di thi khong thong bao
-              old.disconnect(true);
-            }
+        if (id !== socket.id && n.toLowerCase() === username.toLowerCase()) {
+          const old = io.sockets.sockets.get(id);
+
+          if (!old) {
+            // Muc con sot lai cua ket noi da chet -> don di
+            existing.users.delete(id);
+            existing.voice.delete(id);
+            continue;
+          }
+
+          // Ket noi cu cua CHINH tai khoan nay (vd sau khi bam F5) -> dong no lai, cho vao
+          if (old.data.userId === userId) {
+            old.data.silent = true; // ket noi cu roi di thi khong thong bao
+            old.disconnect(true);
             replaced = true;
             continue;
           }
-          return reject('Ten "' + newName + '" da co nguoi dung trong phong nay.');
+
+          return reject('Ten "' + username + '" da co nguoi dung trong phong nay.');
         }
       }
     }
@@ -835,30 +764,29 @@ cidOf.set(socket.id, myCid);
     // ---- Moi kiem tra deu qua: vao phong ----
     if (!existing) createTimes.push(Date.now()); // tinh vao han muc tao phong
 
-   if (currentRoom) leave(false);
+    if (currentRoom) leave(false);
 
-// Rời kênh tin nhắn cũ nếu có
-if (viewedRoom) {
-  socket.leave('chat:' + viewedRoom);
+    // Rời kênh tin nhắn cũ nếu có
+    if (viewedRoom) {
+      socket.leave('chat:' + viewedRoom);
 
-  // Nếu phòng đang xem khác phòng đang tham gia,
-  // rời luôn kênh theo dõi danh sách thành viên cũ
-  if (viewedRoom !== currentRoom) {
-    socket.leave('members:' + viewedRoom);
-  }
-}
+      // Nếu phòng đang xem khác phòng đang tham gia,
+      // rời luôn kênh theo dõi danh sách thành viên cũ
+      if (viewedRoom !== currentRoom) {
+        socket.leave('members:' + viewedRoom);
+      }
+    }
 
-username = newName;
-currentRoom = roomName;
-viewedRoom = roomName;
+    currentRoom = roomName;
+    viewedRoom = roomName;
 
-const r = getRoom(roomName, passText);
-r.users.set(socket.id, newName);
-r.emptySince = null;
+    const r = getRoom(roomName, passText);
+    r.users.set(socket.id, username);
+    r.emptySince = null;
 
-// Kênh tin nhắn riêng
-socket.join('chat:' + roomName);
-socket.join('members:' + roomName);
+    // Kênh tin nhắn riêng
+    socket.join('chat:' + roomName);
+    socket.join('members:' + roomName);
 
     socket.emit('joined', {
       room: roomName,
@@ -867,252 +795,275 @@ socket.join('members:' + roomName);
       voice: voiceNames(r),
       voiceMembers: voiceMembers(r)
     });
+
     socket.to('members:' + roomName).emit('users', {
-  room: roomName,
-  users: [...r.users.values()]
-});
+      room: roomName,
+      users: [...r.users.values()]
+    });
 
     if (SHOW_SYS_MSG && !replaced) {
-  socket.to('chat:' + roomName).emit('sys', newName + ' da vao phong');
-}
+      socket.to('chat:' + roomName).emit('sys', username + ' da vao phong');
+    }
+
     scheduleRooms(); // cap nhat danh sach phong + nguoi trong phong cho moi nguoi
-  });
-// Chỉ chuyển phòng xem tin nhắn, không đổi phòng thành viên hoặc voice
-socket.on('view-room', ({ room, pass }) => {
-  const roomName = clean(room, 20).toLowerCase() || 'chung';
-  const passText = clean(pass, 50);
+  }));
 
-  if (!ROOM_NAME_RE.test(roomName)) return;
+  // Chỉ chuyển phòng xem tin nhắn, không đổi phòng thành viên hoặc voice
+  socket.on('view-room', safe((payload) => {
+    const { room, pass } = isObj(payload) ? payload : {};
+    const roomName = clean(room, 20).toLowerCase() || 'chung';
+    const passText = clean(pass, 50);
 
-  const r = rooms[roomName];
+    if (!ROOM_NAME_RE.test(roomName)) return;
 
-  if (!r) {
-    socket.emit('warn', 'Phòng không tồn tại.');
-    return;
-  }
+    const r = rooms[roomName];
 
-  if (r.hash && !checkPass(r, passText)) {
-    socket.emit('warn', 'Sai mật khẩu của phòng "' + roomName + '".');
-    return;
-  }
+    if (!r) {
+      socket.emit('warn', 'Phòng không tồn tại.');
+      return;
+    }
 
-  if (!r.hash && passText) {
-    socket.emit('warn', 'Phòng này không có mật khẩu.');
-    return;
-  }
+    if (r.hash && !checkPass(r, passText)) {
+      socket.emit('warn', 'Sai mật khẩu của phòng "' + roomName + '".');
+      return;
+    }
 
- if (viewedRoom) {
-  socket.leave('chat:' + viewedRoom);
+    if (!r.hash && passText) {
+      socket.emit('warn', 'Phòng này không có mật khẩu.');
+      return;
+    }
 
-  // Không rời kênh thành viên nếu đó vẫn là phòng đang tham gia
-  if (viewedRoom !== currentRoom) {
-    socket.leave('members:' + viewedRoom);
-  }
-}
+    if (viewedRoom) {
+      socket.leave('chat:' + viewedRoom);
 
-viewedRoom = roomName;
+      // Không rời kênh thành viên nếu đó vẫn là phòng đang tham gia
+      if (viewedRoom !== currentRoom) {
+        socket.leave('members:' + viewedRoom);
+      }
+    }
 
-socket.join('chat:' + roomName);
-socket.join('members:' + roomName);
+    viewedRoom = roomName;
 
-socket.emit('viewed', {
-  room: roomName,
-  history: r.history,
-  users: [...r.users.values()]
-});
-});
-  socket.on('msg', (text) => {
-  if (!viewedRoom || !currentRoom) return;
+    socket.join('chat:' + roomName);
+    socket.join('members:' + roomName);
 
-  const now = Date.now();
-  recent = recent.filter((t) => now - t < WINDOW_MS);
+    socket.emit('viewed', {
+      room: roomName,
+      history: r.history,
+      users: [...r.users.values()]
+    });
+  }));
 
-  if (recent.length >= LIMIT) {
-    socket.emit('warn', 'Ban gui qua nhanh, vui long cho chut.');
-    return;
-  }
+  socket.on('msg', safe((text) => {
+    if (typeof text !== 'string') return;
 
-  recent.push(now);
+    if (!viewedRoom || !currentRoom) {
+      socket.emit('warn', 'Bạn chưa vào phòng nào. Hãy chọn một phòng ở danh sách bên trái.');
+      return;
+    }
 
-  const content = clean(text, MAX_LEN);
-  if (!content) return;
+    const content = clean(text, MAX_LEN);
+    if (!content) return;
 
-  const m = {
-    u: username,
-    t: content,
-    ts: Date.now()
-  };
+    const r = rooms[viewedRoom];
+    if (!r) {
+      socket.emit('warn', 'Phòng này không còn tồn tại.');
+      return;
+    }
 
-  const r = getRoom(viewedRoom);
-  r.history.push(m);
+    const now = Date.now();
+    recent = recent.filter((t) => now - t < WINDOW_MS);
 
-  if (r.history.length > MAX_HISTORY) {
-    r.history.shift();
-  }
+    if (recent.length >= LIMIT) {
+      socket.emit('warn', 'Ban gui qua nhanh, vui long cho chut.');
+      return;
+    }
 
-  dirty = true;
+    recent.push(now);
 
-  io.to('chat:' + viewedRoom).emit('msg', m);
-});
+    const m = {
+      u: username,
+      t: content,
+      ts: now
+    };
 
- // ================= VOICE =================
+    r.history.push(m);
 
-// Vào voice của phòng đang tham gia, không phải phòng đang xem
-socket.on('voice-join', () => {
-  if (!currentRoom || currentRoom === 'chung') {
-    socket.emit('voice-denied', MAX_VOICE);
-    return;
-  }
+    if (r.history.length > MAX_HISTORY) {
+      r.history.shift();
+    }
 
-  const r = rooms[currentRoom];
-  if (!r) return;
+    markDirty(viewedRoom);
 
-  if (voiceRoom === currentRoom && r.voice.has(socket.id)) return;
+    io.to('chat:' + viewedRoom).emit('msg', m);
+  }));
 
-  if (voiceRoom) leaveVoice();
+  // ================= VOICE =================
 
-  if (r.voice.size >= MAX_VOICE) {
-    socket.emit('voice-denied', MAX_VOICE);
-    return;
-  }
+  // Vào voice của phòng đang tham gia, không phải phòng đang xem
+  socket.on('voice-join', safe(() => {
+    if (!currentRoom || currentRoom === 'chung') {
+      socket.emit('voice-denied', MAX_VOICE);
+      return;
+    }
 
-  voiceRoom = currentRoom;
+    const r = rooms[currentRoom];
+    if (!r) return;
 
-  const peers = [...r.voice];
-  r.voice.add(socket.id);
+    if (voiceRoom === currentRoom && r.voice.has(socket.id)) return;
 
-  socket.join('voice:' + voiceRoom);
+    if (voiceRoom) leaveVoice();
 
-  socket.emit('voice-peers', peers);
+    if (r.voice.size >= MAX_VOICE) {
+      socket.emit('voice-denied', MAX_VOICE);
+      return;
+    }
 
-  io.to('voice:' + voiceRoom).emit('voice-users', voiceNames(r));
-  io.to('voice:' + voiceRoom).emit('voice-members', voiceMembers(r));
-});
+    voiceRoom = currentRoom;
 
-socket.on('voice-leave', () => leaveVoice());
+    const peers = [...r.voice];
+    r.voice.add(socket.id);
 
-socket.on('voice-signal', (payload) => {
-  const { to, data } = payload || {};
+    socket.join('voice:' + voiceRoom);
 
-  if (!voiceRoom || typeof to !== 'string' || to === socket.id) return;
+    socket.emit('voice-peers', peers);
 
-  const r = rooms[voiceRoom];
-  if (!r || !r.voice.has(socket.id) || !r.voice.has(to)) return;
+    io.to('voice:' + voiceRoom).emit('voice-users', voiceNames(r));
+    io.to('voice:' + voiceRoom).emit('voice-members', voiceMembers(r));
+  }));
 
-  const now = Date.now();
-  signalTimes = signalTimes.filter((t) => now - t < SIGNAL_WINDOW_MS);
+  socket.on('voice-leave', safe(() => leaveVoice()));
 
-  if (signalTimes.length >= SIGNAL_LIMIT) return;
-  signalTimes.push(now);
+  socket.on('voice-signal', safe((payload) => {
+    const { to, data } = isObj(payload) ? payload : {};
 
-  if (!data || typeof data !== 'object') return;
-  if (JSON.stringify(data).length > 8000) return;
+    if (!voiceRoom || typeof to !== 'string' || to === socket.id) return;
 
-  io.to(to).emit('voice-signal', {
-    from: socket.id,
-    data
-  });
-});
+    const r = rooms[voiceRoom];
+    if (!r || !r.voice.has(socket.id) || !r.voice.has(to)) return;
 
-function leaveVoice() {
-  if (!voiceRoom) return;
+    const now = Date.now();
+    signalTimes = signalTimes.filter((t) => now - t < SIGNAL_WINDOW_MS);
 
-  const oldVoiceRoom = voiceRoom;
-  const r = rooms[oldVoiceRoom];
+    if (signalTimes.length >= SIGNAL_LIMIT) return;
+    signalTimes.push(now);
 
-  voiceRoom = null;
+    if (!data || typeof data !== 'object') return;
+    if (JSON.stringify(data).length > 8000) return;
 
-  if (!r || !r.voice.delete(socket.id)) {
+    io.to(to).emit('voice-signal', {
+      from: socket.id,
+      data
+    });
+  }));
+
+  function leaveVoice() {
+    if (!voiceRoom) return;
+
+    const oldVoiceRoom = voiceRoom;
+    const r = rooms[oldVoiceRoom];
+
+    voiceRoom = null;
+
+    if (!r || !r.voice.delete(socket.id)) {
+      socket.leave('voice:' + oldVoiceRoom);
+      return;
+    }
+
     socket.leave('voice:' + oldVoiceRoom);
-    return;
+
+    io.to('voice:' + oldVoiceRoom).emit('voice-peer-left', socket.id);
+    io.to('voice:' + oldVoiceRoom).emit('voice-users', voiceNames(r));
+    io.to('voice:' + oldVoiceRoom).emit('voice-members', voiceMembers(r));
   }
 
-  socket.leave('voice:' + oldVoiceRoom);
-
-  io.to('voice:' + oldVoiceRoom).emit('voice-peer-left', socket.id);
-  io.to('voice:' + oldVoiceRoom).emit('voice-users', voiceNames(r));
-  io.to('voice:' + oldVoiceRoom).emit('voice-members', voiceMembers(r));
-}
-
-// =========================================
   // =========================================
 
   // silent = true thi khong gui thong bao "da roi phong"
   function leave(silent) {
-  const r = rooms[currentRoom];
-  if (!r) return;
+    const r = rooms[currentRoom];
+    if (!r) return;
 
-  // Rời voice độc lập
-  if (voiceRoom === currentRoom) {
-    leaveVoice();
-  }
-
-  r.users.delete(socket.id);
-
-  if (r.users.size === 0) {
-    r.emptySince = Date.now();
-  }
-
-  socket.leave('members:' + currentRoom);
-
-io.to('members:' + currentRoom).emit('users', {
-  room: currentRoom,
-  users: [...r.users.values()]
-});
-
-if (SHOW_SYS_MSG && !silent) {
-  io.to('chat:' + currentRoom).emit('sys', username + ' da roi phong');
-}
-
-  scheduleRooms();
-}
-
-  socket.on('disconnect', () => {
-  cidOf.delete(socket.id);
-
-  if (currentRoom) leave(!!socket.data.silent);
-});
-});
-async function loadRoomsFromDB() {
-  try {
-    const result = await db.query(
-      'SELECT room_name, history, salt, password_hash FROM chat_rooms'
-    );
-
-    for (const row of result.rows) {
-      rooms[row.room_name] = {
-        history: row.history || [],
-        salt: row.salt,
-        hash: row.password_hash,
-        users: new Map(),
-        voice: new Set(),
-        emptySince: Date.now()
-      };
+    // Rời voice độc lập
+    if (voiceRoom === currentRoom) {
+      leaveVoice();
     }
 
-    console.log(`Đã tải ${result.rows.length} phòng chat từ Neon.`);
-  } catch (err) {
-    console.error('Lỗi tải phòng chat từ Neon:', err);
-    throw err;
+    r.users.delete(socket.id);
+
+    if (r.users.size === 0) {
+      r.emptySince = Date.now();
+    }
+
+    socket.leave('members:' + currentRoom);
+
+    io.to('members:' + currentRoom).emit('users', {
+      room: currentRoom,
+      users: [...r.users.values()]
+    });
+
+    if (SHOW_SYS_MSG && !silent) {
+      io.to('chat:' + currentRoom).emit('sys', username + ' da roi phong');
+    }
+
+    scheduleRooms();
   }
+
+  socket.on('disconnect', () => {
+    untrackSocket(socket);
+
+    try {
+      if (currentRoom) leave(!!socket.data.silent);
+    } catch (err) {
+      console.error('Lỗi khi dọn dẹp lúc ngắt kết nối:', err);
+    }
+  });
+});
+
+async function loadRoomsFromDB() {
+  const result = await db.query(
+    'SELECT room_name, history, salt, password_hash FROM chat_rooms'
+  );
+
+  for (const row of result.rows) {
+    let history = row.history;
+
+    // Du lieu cu co the dang la chuoi JSON
+    if (typeof history === 'string') {
+      try {
+        history = JSON.parse(history);
+      } catch (e) {
+        history = [];
+      }
+    }
+
+    rooms[row.room_name] = {
+      history: Array.isArray(history) ? history : [],
+      salt: row.salt,
+      hash: row.password_hash,
+      users: new Map(),
+      voice: new Set(),
+      emptySince: Date.now()
+    };
+  }
+
+  console.log(`Đã tải ${result.rows.length} phòng chat từ Neon.`);
 }
+
 const PORT = process.env.PORT || 3000;
 
 (async () => {
   try {
-      await initLoginLockTable();
+    await db.initSchema();
     await loadRoomsFromDB();
 
-// Tạo các phòng mặc định nếu chưa có
-ensureDefaultRooms();
+    // Tạo các phòng mặc định nếu chưa có, rồi lưu vào Neon
+    ensureDefaultRooms();
+    if (dirtyRooms.size > 0) await saveNow();
 
-// Lưu các phòng mặc định mới vào Neon
-if (dirty) {
-  await saveNow();
-}
-server.listen(PORT, () => {
-  console.log('Server chay tai http://localhost:' + PORT);
-});
+    server.listen(PORT, () => {
+      console.log('Server chay tai http://localhost:' + PORT);
+    });
   } catch (err) {
     console.error('Server không thể khởi động:', err);
     process.exit(1);

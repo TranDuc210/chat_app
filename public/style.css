@@ -1415,3 +1415,11 @@ header {
   #peerVolumeModal { padding: 14px; }
   #peerVolumePanel { padding: 19px; }
 }
+
+/* Thong bao loi dang nhap / bi da phien */
+#authError {
+  color: #f87171;
+  text-align: center;
+  min-height: 1.2em;
+  margin: 8px 0 0;
+}

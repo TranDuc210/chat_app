@@ -54,7 +54,9 @@ if (!cid) {
   cid = Math.random().toString(36).slice(2) + Date.now().toString(36);
   sessionStorage.setItem('cid', cid);
 }
-const activeCidByUser = new Map();
+let pendingRestore = null;   // phong can vao lai sau khi dang nhap / tai lai trang (dung 1 lan)
+let fallbackTried = false;   // da thu quay ve phong 'chung' sau khi vao phong that bai chua
+let loggingOut = false;      // dang bam Dang xuat (bo qua thong bao 'retry-login' tu server)
 // ===== Icon dai dien: vong tron mau + chu cai dau (tinh ngay tren may, khong ton bang thong) =====
 function colorOf(name) {
   let h = 0;
@@ -95,24 +97,83 @@ function makeChip(name, inVoiceNow) {
 
 // 1. Dang nhap
 
-function login(user) {
+// restore = true: tai lai trang (F5) -> vao lai phong truoc do. false: dang nhap moi -> vao 'chung'.
+function login(user, restore) {
   myName = user.username;
 
+  // Ngat ket noi cu (neu con) truoc khi mo ket noi moi
+  if (socket) {
+    const old = socket;
+    socket = null;
+    old.disconnect();
+  }
+
   // Xóa trạng thái phòng của phiên trước
- currentRoom = null;
-currentPass = '';
-memberRoom = null;
-memberPass = '';
-tryPass = '';
+  currentRoom = null;
+  currentPass = '';
+  memberRoom = null;
+  memberPass = '';
+  tryPass = '';
+  lastRooms = [];
+  currentUsers = [];
+  voiceNames = [];
+  voiceMembers = [];
+  fallbackTried = false;
+
+  let saved = null;
+  try { saved = sessionStorage.getItem('memberRoom'); } catch (e) { /* bo qua */ }
+  pendingRestore = (restore && saved) ? saved : 'chung';
 
   $('login').classList.add('hidden');
   $('app').classList.remove('hidden');
 
   socket = io({
-  transports: ['websocket'],
-  auth: { cid }
-});
+    transports: ['websocket'],
+    auth: { cid }
+  });
   setupSocket();
+}
+
+// Ve man hinh dang nhap va don sach moi thu cua phien truoc (tin nhan, danh sach phong...)
+function backToLogin(message) {
+  // Ngat socket truoc: no se goi 'disconnect' ngay, sau do ta moi don giao dien
+  const old = socket;
+  socket = null;
+  if (old) old.disconnect();
+
+  leaveVoice(false);
+
+  myName = '';
+  currentRoom = null;
+  currentPass = '';
+  memberRoom = null;
+  memberPass = '';
+  tryPass = '';
+  lastRooms = [];
+  currentUsers = [];
+  voiceNames = [];
+  voiceMembers = [];
+  pendingRestore = null;
+  fallbackTried = false;
+  try { sessionStorage.removeItem('memberRoom'); } catch (e) { /* bo qua */ }
+
+  $('messages').innerHTML = '';
+  $('roomList').innerHTML = '';
+  $('userList').innerHTML = '';
+  $('roomTitle').textContent = '# chung';
+
+  closePanels();
+  $('roomModal').classList.add('hidden');
+  $('voiceModal').classList.add('hidden');
+  $('peerVolumeModal').classList.add('hidden');
+
+  $('app').classList.add('hidden');
+  $('login').classList.remove('hidden');
+  $('loginForm').classList.remove('hidden');
+  $('registerForm').classList.add('hidden');
+  $('loginInput').value = '';
+  $('loginPassword').value = '';
+  $('authError').textContent = message || '';
 }
 
 
@@ -146,7 +207,7 @@ $('loginForm').addEventListener('submit', async (e) => {
       return;
     }
 
-    login(data.user);
+    login(data.user, false);
   } catch (err) {
     console.error(err);
     $('authError').textContent = 'Không thể kết nối máy chủ.';
@@ -185,7 +246,7 @@ $('registerForm').addEventListener('submit', async (e) => {
       return;
     }
 
-    login(data.user);
+    login(data.user, false);
   } catch (err) {
     console.error(err);
     $('authError').textContent = 'Không thể kết nối máy chủ.';
@@ -207,6 +268,7 @@ $('showLoginBtn').addEventListener('click', () => {
 });
 
 $('logoutBtn').addEventListener('click', async () => {
+  loggingOut = true;
   try {
     const res = await fetch('/api/logout', {
       method: 'POST'
@@ -219,34 +281,12 @@ $('logoutBtn').addEventListener('click', async () => {
       return;
     }
 
-    if (socket) {
-      socket.disconnect();
-      socket = null;
-    }
-
-    myName = '';
-
-      currentRoom = null;
-currentPass = '';
-
-memberRoom = null;
-memberPass = '';
-
-tryPass = '';
-
-    $('app').classList.add('hidden');
-    $('login').classList.remove('hidden');
-
-    $('loginForm').classList.remove('hidden');
-    $('registerForm').classList.add('hidden');
-
-    $('loginInput').value = '';
-    $('loginPassword').value = '';
-    $('authError').textContent = '';
-
+    backToLogin('');
   } catch (err) {
     console.error(err);
     alert('Không thể kết nối máy chủ.');
+  } finally {
+    loggingOut = false;
   }
 });
 
@@ -283,7 +323,18 @@ function setupSocket() {
   });
 
   socket.on('rooms', (list) => {
-    lastRooms = list;
+    lastRooms = Array.isArray(list) ? list : [];
+
+    // Vua dang nhap / vua tai lai trang: vao phong can vao (chi 1 lan)
+    if (pendingRestore) {
+      const want = pendingRestore;
+      pendingRestore = null;
+      const info = lastRooms.find((r) => r[0] === want);
+      // Chi vao lai phong con ton tai va khong co mat khau; neu khong thi ve 'chung'
+      const target = info && !info[1] ? want : 'chung';
+      requestJoin(target, '');
+    }
+
     renderRooms();
   });
 
@@ -291,10 +342,12 @@ function setupSocket() {
     // Moi lan vao/doi phong, server deu xoa ban khoi voice -> client cung phai roi voice
     if (inVoice) leaveVoice(false);
     currentRoom = room;
-currentPass = tryPass;
+    currentPass = tryPass;
 
-memberRoom = room;
-memberPass = tryPass; // nho mat khau de tu vao lai khi mat ket noi
+    memberRoom = room;
+    memberPass = tryPass; // nho mat khau de tu vao lai khi mat ket noi
+    fallbackTried = false;
+    try { sessionStorage.setItem('memberRoom', room); } catch (e) { /* bo qua */ }
     voiceNames = voice || [];
     voiceMembers = members || [];
     $('roomTitle').textContent = '# ' + room;
@@ -304,38 +357,50 @@ memberPass = tryPass; // nho mat khau de tu vao lai khi mat ket noi
     closePanels();        // tren dien thoai: dong ngan keo sau khi vao phong
     if (autoVoice && room !== 'chung') joinVoice(); // tu dong vao voice cua phong moi
   });
-socket.on('viewed', ({ room, history, users }) => {
-  currentRoom = room;
 
-  $('roomTitle').textContent = '# ' + room;
-  $('messages').innerHTML = '';
+  // Chi xem tin nhan cua mot phong (khong doi phong thanh vien, khong anh huong voice)
+  socket.on('viewed', ({ room, history, users }) => {
+    currentRoom = room;
 
-  history.forEach(addMessage);
+    $('roomTitle').textContent = '# ' + room;
+    $('messages').innerHTML = '';
 
-  voiceNames = [];
-  renderUsers(users || []);
+    history.forEach(addMessage);
 
-  closePanels();
-  renderRooms();
-});
+    // voiceNames la cua phong thanh vien: giu nguyen, chi hien khi dang xem dung phong do
+    renderUsers(users || []);
+
+    closePanels();
+    renderRooms();
+  });
   socket.on('msg', addMessage);
-  socket.on('users', renderUsers);
+  socket.on('users', onUsers);
   socket.on('sys', addSystem);
   socket.on('warn', (text) => alert(text));
+
+  // Vao phong that bai (sai mat khau, ten khong hop le...). Neu chua o phong nao thi ve 'chung'
+  socket.on('join-failed', () => {
+    if (!memberRoom && !fallbackTried) {
+      fallbackTried = true;
+      requestJoin('chung', '');
+    }
+  });
+
+  // Co nguoi dang nhap tai khoan nay o noi khac -> phien nay bi da ra
+  socket.on('kicked', (message) => {
+    backToLogin(message || 'Tài khoản vừa được đăng nhập ở nơi khác.');
+  });
+
   socket.on('retry-login', () => {
-  leaveVoice(false);
-  currentRoom = null;
-  currentPass = '';
-  memberRoom = null;
-  memberPass = '';
-  tryPass = '';
-  currentUsers = [];
-  voiceNames = [];
-  voiceMembers = [];
-  socket.disconnect();
-  $('app').classList.add('hidden');
-  $('login').classList.remove('hidden');
-});
+    if (loggingOut) return; // minh vua tu bam Dang xuat
+    backToLogin('Phiên đăng nhập đã kết thúc. Hãy đăng nhập lại.');
+  });
+
+  // Server tu choi ket noi (het phien, bi da...). Mat mang tam thoi thi socket.io tu thu lai.
+  socket.on('connect_error', (err) => {
+    if (!socket || socket.active) return;
+    backToLogin((err && err.message) || 'Không thể kết nối. Hãy đăng nhập lại.');
+  });
 
   // ---- Su kien voice tu server ----
   socket.on('voice-users', (names) => {
@@ -360,9 +425,25 @@ socket.on('viewed', ({ room, history, users }) => {
   });
 }
 
+// Server gui 'users' dang { room, users } (mang tran cu van duoc chap nhan)
+function onUsers(p) {
+  const users = Array.isArray(p) ? p : (p && p.users);
+  const room = Array.isArray(p) ? currentRoom : (p && p.room);
+  if (!Array.isArray(users)) return;
+  if (room !== currentRoom) return; // chi ve khi dung la phong dang xem
+  renderUsers(users);
+}
+
 function joinRoom(room, locked) {
   if (room === currentRoom) {
     closePanels();
+    return;
+  }
+
+  // Minh DA la thanh vien phong nay (chi dang xem phong khac): chi xem lai, khong vao lai
+  // (vao lai se bi mat voice)
+  if (room === memberRoom) {
+    requestViewRoom(room, memberPass);
     return;
   }
 
@@ -373,13 +454,13 @@ function joinRoom(room, locked) {
     if (pass === null) return;
   }
 
-  // Chung chỉ chuyển sang xem tin nhắn
-  if (room === 'chung') {
+  // Dang la thanh vien phong khac thi 'chung' chi de xem tin nhan (khong bo phong dang o)
+  if (room === 'chung' && memberRoom) {
     requestViewRoom(room, pass);
     return;
   }
 
-  // Các phòng khác vẫn tham gia như bình thường
+  // Cac truong hop con lai: tham gia phong
   requestJoin(room, pass);
 }
 
@@ -400,13 +481,15 @@ function renderRooms() {
 
     // Phong hien tai: dung danh sach moi nhat; phong khac: dung du lieu server gui
     const isCur = r === currentRoom;
-    const list = isCur ? currentUsers : names;
+    const list = isCur ? currentUsers : (names || []);
     const count = isCur ? currentUsers.length : total;
+    // Huy hieu voice chi dung o phong thanh vien (noi minh dang o voice)
+    const showVoice = isCur && currentRoom === memberRoom;
     if (list.length) {
       const members = document.createElement('div');
       members.className = 'members';
       list.slice(0, MAX_SHOWN).forEach((n) =>
-        members.appendChild(makeChip(n, isCur && voiceNames.includes(n))));
+        members.appendChild(makeChip(n, showVoice && voiceNames.includes(n))));
       if (count > MAX_SHOWN) {
         const more = document.createElement('div');
         more.className = 'more';
@@ -466,13 +549,14 @@ function pushToBox(el) {
 
 // Cot ONLINE ben phai + cap nhat nguoi trong phong hien tai
 function renderUsers(users) {
+  users = Array.isArray(users) ? users : [];
   currentUsers = users;
   $('userList').innerHTML = '';
   users.forEach((u) => {
     const li = document.createElement('li');
-    const inVoiceNow = voiceNames.includes(u);
+    const inVoiceNow = currentRoom === memberRoom && voiceNames.includes(u);
     li.appendChild(makeChip(u, inVoiceNow));
-    
+
     $('userList').appendChild(li);
   });
   renderRooms();
@@ -1544,7 +1628,7 @@ async function checkLogin() {
     const data = await res.json();
 
     if (res.ok && data.user) {
-      login(data.user);
+      login(data.user, true);
     }
   } catch (err) {
     console.error('Không thể kiểm tra đăng nhập:', err);
